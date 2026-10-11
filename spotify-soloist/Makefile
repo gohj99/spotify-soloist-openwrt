@@ -17,10 +17,6 @@ PKG_RELEASE:=1
 PKG_LICENSE:=MIT
 PKG_MAINTAINER:=Spotify Soloist OpenWrt contributors
 
-# Architecture independent: the package is scripts plus configuration. The
-# actual binary is downloaded at runtime, so one package serves every target.
-PKGARCH:=all
-
 include $(INCLUDE_DIR)/package.mk
 
 define Package/spotify-soloist
@@ -28,6 +24,11 @@ define Package/spotify-soloist
   CATEGORY:=Multimedia
   TITLE:=Spotify Soloist headless Spotify Connect client
   URL:=https://developer.spotify.com/documentation/soloist
+  # This package is scripts and configuration only; the Soloist binary itself is
+  # downloaded at runtime by the updater. PKGARCH belongs inside this block, and
+  # "all" is what makes one ipk installable on every target -- arch-specific
+  # kmods are resolved by opkg as DEPENDS, not at build time.
+  PKGARCH:=all
   # Spotify publishes glibc builds only. On a musl image the download succeeds
   # and then the binary refuses to execute, so the package is marked
   # unavailable there rather than installing something that cannot run.

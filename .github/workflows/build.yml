@@ -78,7 +78,9 @@ jobs:
         if: success()
         with:
           name: ${{ matrix.package }}-ipk
-          path: bin/packages/x86_64/feed/*.ipk
+          # Must name the package: both feeds build into the same directory, so
+          # a bare *.ipk glob would put every package in every artifact.
+          path: bin/packages/x86_64/feed/${{ matrix.package }}_*.ipk
           if-no-files-found: error
 
       - name: Upload logs
