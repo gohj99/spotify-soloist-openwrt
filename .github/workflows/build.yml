@@ -45,12 +45,12 @@ jobs:
             make defconfig
 
             # Verify the package is now visible
-            make -f .config -f tmp/.packagedeps \
-              -f <(echo "$(info $(sort $(package-y) $(package-m)))"; echo -en "a:\n\t@:") \
-              | grep -q "${{ matrix.package }}" || {
-                echo "ERROR: ${{ matrix.package }} not in enabled packages"
-                exit 1
-              }
+            grep -q "CONFIG_PACKAGE_${{ matrix.package }}=" .config || {
+              echo "ERROR: ${{ matrix.package }} not in .config after defconfig"
+              echo "=== Available spotify packages:"
+              grep "CONFIG_PACKAGE_.*spotify" .config || echo "(none found)"
+              exit 1
+            }
           '
 
       - name: Build package

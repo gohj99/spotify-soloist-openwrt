@@ -38,10 +38,6 @@ define Package/spotify-soloist
 	+ca-bundle +curl +libgcc1 +libatomic1 +libpthread +librt \
 	+pulseaudio-daemon +pulseaudio-tools +libpulse +alsa-utils \
 	+kmod-sound-core +kmod-usb-audio +kmod-sound-soc-core
-  # soloist=: user for the daemon (uid auto-assigned by OpenWrt)
-  # audio=29: PulseAudio client auth group (-Daccess_group=audio); gid 29 is Debian convention
-  # pulse=:   membership in pulse group to access /var/run/pulse (0750 pulse:pulse)
-  USERID:=soloist=:audio=29,pulse=
 endef
 
 # Why these dependencies:
@@ -88,6 +84,27 @@ endef
 define Package/spotify-soloist/postinst
 #!/bin/sh
 [ -n "$${IPKG_INSTROOT}" ] || {
+	# --- user and groups -------------------------------------------------
+	# Create soloist user if missing, and add to audio+pulse groups.
+	# audio: PulseAudio auth group (gid 29, Debian convention)
+	# pulse: /var/run/pulse is 0750 pulse:pulse, need membership to traverse
+	grep -q '^audio:' /etc/group || echo 'audio:x:29:' >> /etc/group
+	grep -q '^pulse:' /etc/group || echo 'pulse:x:1001:' >> /etc/group
+
+	id soloist >/dev/null 2>&1 || {
+		uid=$$(awk -F: '$$3>=100 && $$3<60000 {if($$3>m) m=$$3} END {print m+1}' /etc/passwd)
+		echo "soloist:x:$$uid:$$uid:Spotify Soloist:/var/run/spotify-soloist:/bin/false" >> /etc/passwd
+		echo "soloist:x:$$uid:" >> /etc/group
+	}
+
+	for g in audio pulse; do
+		grep "^$$g:" /etc/group | grep -q soloist || \
+			sed -i "s/^\($$g:.*\)$$/\1,soloist/" /etc/group
+	done
+
+	mkdir -p /var/run/spotify-soloist
+	chown soloist:soloist /var/run/spotify-soloist
+
 	# --- API key ---------------------------------------------------------
 	mkdir -p /etc/spotify-soloist
 	chmod 0700 /etc/spotify-soloist
