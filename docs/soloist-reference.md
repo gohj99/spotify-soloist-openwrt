@@ -89,6 +89,26 @@ there is no equivalent flag; `PULSE_SINK` is PulseAudio's own client setting and
 is honoured by libpulse (confirmed in PulseAudio's `client-conf.c`, which defines
 `ENV_DEFAULT_SINK "PULSE_SINK"`).
 
+### `--initial-volume`: the two sources disagree
+
+Spotify's documentation and the binary's own `--help` do not say the same thing
+about the default:
+
+| Source | What it says |
+|---|---|
+| Command-line reference page | "If omitted, Spotify Soloist uses the audio system's current/default volume." |
+| `soloist --help` on 1.3.9.9 | `-i, --initial-volume <n>   Initial volume 0-100 (default: 40)` |
+
+These cannot both be true. The likely reconciliation is that `--help` is
+describing the fallback value the build applies, while the documentation is
+describing what happens when the flag is absent — but that is a guess, and it has
+not been tested against a running Spotify account.
+
+**How this package handles it:** `initial_volume` defaults to `40` in UCI and is
+always passed explicitly, so the behaviour does not depend on which reading is
+correct. Set it to an empty value to omit the flag and follow the sound system
+instead; the init script then skips the argument entirely.
+
 ## Runtime files in the data directory
 
 | File | Contents |

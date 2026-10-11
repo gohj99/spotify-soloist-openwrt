@@ -94,6 +94,7 @@ in the device picker. Pairing is stored in the data directory.
 /usr/bin/spotify-soloist-updater --force
 /usr/bin/spotify-soloist-check --days
 /usr/bin/spotify-soloist-audio --list
+/usr/bin/spotify-soloist-cron show        # the installed schedule
 ```
 
 ## Configuration options
@@ -102,9 +103,10 @@ in the device picker. Pairing is stored in the data directory.
 |---|---|---|
 | `enabled` | `0` | start the service |
 | `device_name` | hostname | name in the Spotify Connect picker |
+| `require_pair` | `0` | run once in pairing mode, then stop |
 | `audio_backend` | `auto` | `auto`, `pulseaudio` or `pipewire` |
 | `alsa_output` | `auto` | which sound card to play from, e.g. `hw:1` |
-| `pipewire_device` | — | PipeWire node name or id |
+| `pipewire_device` | — | PipeWire node name or id (official `--pipewire-device`) |
 | `initial_volume` | `40` | volume at startup, 0–100 |
 | `data_dir` | `/etc/spotify-soloist/data` | identity and paired session |
 | `cache_dir` | `/tmp/spotify-soloist/cache` | playback cache, on tmpfs |
@@ -114,7 +116,9 @@ in the device picker. Pairing is stored in the data directory.
 | `ws_port` | `9090` | `0` picks a free port |
 | `auto_update` | `1` | download new builds before expiry |
 | `update_threshold` | `15` | days remaining before updating |
+| `update_notify_only` | `0` | warn instead of downloading (metered links) |
 | `check_update_cron` | `17 4 * * 0` | when the check runs |
+| `verbose` | `0` | verbose logging |
 | `run_as_root` | `0` | diagnostic only |
 
 ## The 90-day expiry

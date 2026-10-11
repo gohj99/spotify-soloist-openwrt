@@ -39,12 +39,17 @@ setup_pulse_env() {
 	procd_set_param env XDG_RUNTIME_DIR=/var/run/pulse
 
 	if [ -n "$cookie" ]; then
-		# A system-mode PulseAudio writes the shared cookie as pulse:pulse
-		# 0600, which an unprivileged client in the pulse group still cannot
-		# read. Widen it to group-readable once, here, so the daemon does not
-		# have to run as root.
+		# The shared cookie is written for the pulse user. An unprivileged
+		# client that is not the owner needs group read to use it, so widen it
+		# once here rather than running the whole daemon as root.
+		#
+		# Note the group: PulseAudio is built by OpenWrt with
+		# -Daccess_group=audio, and module-native-protocol-unix falls back to
+		# that group for client authorization in system mode. The audio group is
+		# what actually gets a client past authentication, which is why the
+		# package puts the soloist user in it.
 		if [ -n "$RUN_USER" ] && [ "$(id -u)" = "0" ]; then
-			chgrp pulse "$cookie" 2>/dev/null
+			chgrp audio "$cookie" 2>/dev/null
 			chmod 0640 "$cookie" 2>/dev/null
 		fi
 		[ -r "$cookie" ] && procd_set_param env PULSE_COOKIE="$cookie"
@@ -107,13 +112,23 @@ start_service() {
 		return 1
 	fi
 
-	# An expired build exits with status 10 the instant it starts. Refusing to
-	# launch it keeps procd from respawning a corpse every five seconds.
+	# An expired build exits with status 10 the instant it starts, and procd
+	# would then respawn it every few seconds forever. Refusing to launch it
+	# turns a silent crash loop into one clear log line.
 	days=$(soloist_days_remaining)
-	if [ "$days" -le 0 ] 2>/dev/null; then
-		log_msg "build expired ${days#-} day(s) ago: run /usr/bin/spotify-soloist-updater" user.err
-		return 1
-	fi
+	case "$days" in
+		''|*[!0-9-]*)
+			# Unreadable build date. Let it start and find out the hard way
+			# rather than blocking a working binary.
+			log_msg "could not read the build date; starting anyway" user.warn
+			;;
+		*)
+			if [ "$days" -le 0 ]; then
+				log_msg "build expired ${days#-} day(s) ago: run /usr/bin/spotify-soloist-updater" user.err
+				return 1
+			fi
+			;;
+	esac
 
 	if ! soloist_api_key_present; then
 		log_msg "no API key stored: add one on the Spotify Soloist page in LuCI" user.err
@@ -187,12 +202,20 @@ start_service() {
 			;;
 	esac
 
-	# Spotify's build defaults the initial volume to 40.
+	# Initial volume. Spotify's documentation and the binary's --help disagree
+	# about the default (see docs/soloist-reference.md), so UCI carries an
+	# explicit 40 and the flag is always passed. Note that config_get() uses
+	# ${VAR:-default}, so clearing the option yields 40 rather than an empty
+	# value: the two paths are the same on purpose.
 	case "$initial_volume" in
-		''|*[!0-9]*) ;;
+		''|*[!0-9]*)
+			initial_volume=40
+			procd_append_param command --initial-volume "$initial_volume"
+			;;
 		*)
-			[ "$initial_volume" -le 100 ] &&
+			if [ "$initial_volume" -le 100 ]; then
 				procd_append_param command --initial-volume "$initial_volume"
+			fi
 			;;
 	esac
 
@@ -230,7 +253,16 @@ start_service() {
 		procd_set_param group "$RUN_USER"
 	fi
 
-	procd_set_param respawn 3600 5 0
+	# respawn THRESHOLD TIMEOUT RETRY:
+	#   an instance that dies within THRESHOLD seconds counts as a crash,
+	#   procd waits TIMEOUT seconds before restarting it, and after RETRY
+	#   consecutive crashes it gives up instead of looping forever.
+	#
+	# RETRY is deliberately finite. Soloist exits 1 on a bad API key, an
+	# unwritable data directory, or a stale lock, and none of those fix
+	# themselves; an unbounded retry would just fill the log and keep the CPU
+	# warm. The expiry guard above already handles the exit-10 case.
+	procd_set_param respawn 3600 5 5
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_set_param cwd /tmp
@@ -245,17 +277,36 @@ start_service() {
 }
 
 stop_service() {
-	# The daemon leaves a lock file behind; a stale one makes the next start
-	# look like a second instance on the same data directory.
+	# Two pieces of leftover state would make the next start misbehave:
+	#   .lock        the daemon's own lock on the data directory, which makes a
+	#                restart look like a second instance (exit 1)
+	#   soloist.pid  removed by us rather than the daemon, so that
+	#                soloist_running_pid() reports "not running" immediately
 	local data_dir
 	config_load spotify-soloist
 	config_get data_dir main data_dir "${SOLOIST_DATA_DIR}"
+
 	rm -f "${data_dir}/.lock" 2>/dev/null
+	rm -f "${data_dir}/soloist.pid" 2>/dev/null
+	rm -f "${data_dir}/ws.addr" "${data_dir}/ws.port" 2>/dev/null
+
 	return 0
 }
 
 service_triggers() {
 	procd_add_reload_trigger spotify-soloist
+}
+
+# Applied on every `reload`, which is what LuCI issues after a Save & Apply.
+# The daemon's own flags are handled by procd's reload trigger; the crontab is
+# not part of the daemon, so it has to be synced explicitly or a changed
+# schedule would never take effect.
+reload_service() {
+	[ -x /usr/bin/spotify-soloist-cron ] &&
+		/usr/bin/spotify-soloist-cron sync >/dev/null 2>&1
+
+	stop
+	start
 }
 
 info_service() {

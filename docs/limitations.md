@@ -97,8 +97,11 @@ that happens. Nothing in this package bypasses the check, and nothing can.
 
 What the package does is make the expiry survivable:
 
-- the init script **refuses to start an expired build**, so procd does not
-  respawn a corpse every five seconds
+- the init script **refuses to start an expired build** (`--version` is read to
+  get the build timestamp, and 90 days are added), so the log gets one clear line
+  instead of a respawn loop
+- `respawn 3600 5 5` bounds the restart behaviour anyway: five crashes in a row
+  and procd stops trying
 - a weekly cron job (`17 4 * * 0`) checks the remaining time
 - with `auto_update` on, it downloads and installs a fresh build once 15 days
   remain, restarting the service only if the new build comes up cleanly

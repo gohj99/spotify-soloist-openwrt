@@ -62,6 +62,14 @@ o = s:option(Value, "device_name", translate("Device name"),
 o.placeholder = "OpenWrt speaker"
 o.rmempty = true
 
+o = s:option(Flag, "require_pair", translate("Pairing mode"),
+	translate("Start Soloist with --pair instead of running normally: it " ..
+		"authenticates through Spotify Connect, stores the session in the data " ..
+		"directory, and exits. Enable it for one start to pair, then turn it " ..
+		"back off. Normal operation pairs on first playback without this."))
+o.default = "0"
+o.rmempty = false
+
 o = s:option(Value, "initial_volume", translate("Initial volume"),
 	translate("Volume applied at startup, 0-100. Spotify's build defaults " ..
 		"to 40."))

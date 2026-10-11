@@ -40,31 +40,60 @@ die() {
 # --- candidate verification ------------------------------------------------
 
 # Returns 0 if the file looks like an ELF for the running architecture.
+#
+# This is only a pre-check that lets us produce a clearer error than letting the
+# kernel fail. `od` is NOT enabled in OpenWrt's default busybox build, so the
+# check is skipped when it is missing; verify_runnable() below is the gate that
+# actually decides, and it catches a wrong architecture by itself.
 verify_elf_arch() {
 	local file="$1" machine expect
 
-	machine=$(od -An -tx1 -j18 -N2 "${file}" 2>/dev/null | tr -d ' \n')
-	[ -n "$machine" ] || return 1
+	command -v od >/dev/null 2>&1 || {
+		log_msg "note: od is unavailable, skipping the ELF pre-check" user.debug
+		return 0
+	}
 
-	# e_machine, little endian: 0xb7 = aarch64, 0x28 = arm, 0x3e = x86-64
+	# e_machine is a little-endian 16-bit field at offset 18. All the values we
+	# care about are below 0x100, so the high byte is always zero and reading the
+	# first byte alone is enough.
+	machine=$(od -An -tx1 -j18 -N1 "${file}" 2>/dev/null | tr -d ' \n')
+	[ -n "$machine" ] || return 0
+
 	case "$(uname -m)" in
-		aarch64|arm64) expect="b700" ;;
-		armv7l|armv6l|armv7|arm) expect="2800" ;;
-		x86_64|amd64) expect="3e00" ;;
-		*) return 1 ;;
+		aarch64|arm64) expect="b7" ;;
+		armv7l|armv6l|armv7|arm) expect="28" ;;
+		x86_64|amd64) expect="3e" ;;
+		*) return 0 ;;
 	esac
 
 	[ "$machine" = "$expect" ]
 }
 
 # Run the candidate binary. This is the real gate: it catches wrong
-# architecture, missing glibc/libatomic/libgcc_s and internal inconsistencies.
+# architecture, a missing glibc interpreter, and missing libatomic/libgcc_s.
 verify_runnable() {
-	local file="$1" out
+	local file="$1" out rc
 
 	out=$("${file}" --version 2>&1)
-	if [ $? -ne 0 ]; then
-		log_msg "candidate is not runnable here: ${out}" user.err
+	rc=$?
+
+	if [ "$rc" -ne 0 ]; then
+		# Distinguish the two failure modes, because they need different fixes
+		# and the kernel's message for the second one is actively misleading.
+		case "$out" in
+			*"Exec format error"*)
+				log_msg "candidate is built for a different CPU architecture" user.err
+				;;
+			*"No such file or directory"*)
+				# The file exists, so this means its ELF interpreter does not:
+				# a glibc binary on a musl system.
+				log_msg "candidate cannot run here: its dynamic loader is missing." user.err
+				log_msg "Spotify ships glibc builds and this appears to be a musl system." user.err
+				;;
+			*)
+				log_msg "candidate exited ${rc}: ${out}" user.err
+				;;
+		esac
 		return 1
 	fi
 
@@ -86,16 +115,6 @@ verify_runnable() {
 
 	echo "$out"
 	return 0
-}
-
-# Same arithmetic as soloist_days_remaining() but for an explicit epoch.
-soloist_days_remaining_for_epoch() {
-	local build="$1" now
-	now=$(date +%s 2>/dev/null) || {
-		echo "-1"
-		return 1
-	}
-	echo $(( (build + SOLOIST_BUILD_TTL_DAYS * 86400 - now) / 86400 ))
 }
 
 # Optional pinning: one "<archive-name> <sha256>" per line in /etc/spotify-soloist/sha256.
@@ -121,20 +140,37 @@ verify_pinned_hash() {
 
 # --- installation ---------------------------------------------------------
 
+# Ask procd to stop the daemon, and fall back to a direct kill if the pid is
+# still there. `pkill` is NOT in OpenWrt's default busybox build, so the pid
+# comes from the runtime file the daemon writes rather than from pkill.
 stop_daemon() {
+	local pidfile="${SOLOIST_DATA_DIR}/soloist.pid"
+	local pid="" i=0
+
 	/etc/init.d/spotify-soloist stop >/dev/null 2>&1
 	sleep 1
 
-	# The daemon should be gone; make sure.
-	local i=0
-	while [ $i -lt 10 ]; do
-		pgrep -f "${SOLOIST_BIN}" >/dev/null 2>&1 || return 0
+	# procd may need a moment; poll rather than guessing.
+	while [ "$i" -lt 10 ]; do
+		pid=$(soloist_running_pid)
+		[ -n "$pid" ] || return 0
 		sleep 1
 		i=$((i + 1))
 	done
 
-	pkill -f "${SOLOIST_BIN}" 2>/dev/null
+	# Still alive: give it TERM, then KILL.
+	log_msg "daemon pid ${pid} survived stop, killing it" user.warn
+	kill "$pid" 2>/dev/null
+	i=0
+	while [ "$i" -lt 5 ]; do
+		kill -0 "$pid" 2>/dev/null || return 0
+		sleep 1
+		i=$((i + 1))
+	done
+
+	kill -9 "$pid" 2>/dev/null
 	sleep 1
+	rm -f "$pidfile" 2>/dev/null
 	return 0
 }
 

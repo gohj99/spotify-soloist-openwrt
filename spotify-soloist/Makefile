@@ -36,9 +36,35 @@ define Package/spotify-soloist
   # use this package. See docs/limitations.md.
   DEPENDS:=@(!USE_MUSL||BROKEN) \
 	+ca-bundle +curl +libgcc1 +libatomic1 +libpthread +librt \
-	+pulseaudio-daemon +libpulse +alsa-utils
+	+pulseaudio-daemon +pulseaudio-tools +libpulse +alsa-utils \
+	+kmod-sound-core +kmod-usb-audio +kmod-sound-soc-core
+  # soloist  : the account the daemon runs as
+  # audio=29 : PulseAudio's client authorization group. OpenWrt builds it with
+  #            -Daccess_group=audio and system-mode auth_group falls back to
+  #            that name. base-files ships no audio group, so this entry creates
+  #            it, using the conventional Debian gid.
+  # pulse    : /var/run/pulse is mode 0750 pulse:pulse, so without this the
+  #            client cannot even traverse into the directory to reach the
+  #            socket. Created by pulseaudio-daemon; nothing needs the gid.
   USERID:=soloist=soloist:audio=29,pulse
 endef
+
+# Why these dependencies:
+#
+#   ca-bundle, curl        to download the build over TLS
+#   libgcc1, libatomic1    the runtimes the binary links against; libpthread
+#                          and librt are separate packages on musl
+#   pulseaudio-daemon      the sound server; Soloist has no ALSA or JACK path
+#   pulseaudio-tools       pactl, used to list and resolve sinks
+#   libpulse               the client library the binary dlopens
+#   alsa-utils             aplay/alsamixer/speaker-test, for diagnosis
+#   kmod-sound-core        the ALSA core; without it there is no /dev/snd
+#   kmod-usb-audio         USB DACs and USB-to-3.5mm adapters, which is the
+#                          usual way to get audio out of a router
+#   kmod-sound-soc-core    on-board codecs on SoC targets
+#
+# The kmods can be deselected for a smaller image; the init script reports when
+# no card is present rather than failing silently.
 
 define Package/spotify-soloist/description
   Runs Spotify Soloist, a headless Spotify Connect client, as a procd service
@@ -85,11 +111,12 @@ define Package/spotify-soloist/postinst
 	chown -R soloist:soloist /tmp/spotify-soloist 2>/dev/null
 
 	# --- cron ------------------------------------------------------------
-	# Installed here but harmless until updates are enabled: the check script
-	# exits immediately while auto_update is off.
-	CRON_LINE="17 4 * * 0 /usr/bin/spotify-soloist-check"
-	if ! crontab -l 2>/dev/null | grep -qF "spotify-soloist-check"; then
-		(crontab -l 2>/dev/null; echo "$$CRON_LINE") | crontab - 2>/dev/null
+	# The schedule is a UCI option, so it is written through the same helper
+	# that runs whenever the configuration is applied. Doing it inline here
+	# would leave the crontab stale as soon as someone changed the schedule in
+	# LuCI, which is what used to happen.
+	if [ -x /usr/bin/spotify-soloist-cron ]; then
+		/usr/bin/spotify-soloist-cron sync 2>/dev/null
 	fi
 
 	# --- bring the daemon in line with the config ------------------------
@@ -154,6 +181,7 @@ define Package/spotify-soloist/install
 	$(INSTALL_BIN) ./files/usr/bin/spotify-soloist-set-key $(1)/usr/bin/
 	$(INSTALL_BIN) ./files/usr/bin/spotify-soloist-status $(1)/usr/bin/
 	$(INSTALL_BIN) ./files/usr/bin/spotify-soloist-audio $(1)/usr/bin/
+	$(INSTALL_BIN) ./files/usr/bin/spotify-soloist-cron $(1)/usr/bin/
 
 	$(INSTALL_DIR) $(1)/usr/lib/spotify-soloist
 	$(INSTALL_DATA) ./files/usr/lib/spotify-soloist/common.sh $(1)/usr/lib/spotify-soloist/

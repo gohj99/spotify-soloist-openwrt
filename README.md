@@ -110,6 +110,7 @@ the session then lives in the data directory.
 /usr/bin/spotify-soloist-check            # what cron runs
 /usr/bin/spotify-soloist-check --days     # remaining days on the current build
 /usr/bin/spotify-soloist-audio --list     # sound cards and sinks
+/usr/bin/spotify-soloist-cron show        # the installed schedule
 ```
 
 ## Configuration reference

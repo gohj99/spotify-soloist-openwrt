@@ -154,34 +154,84 @@ pactl list short sinks        # needs pulseaudio-tools
 speaker-test -t sine -f 440 -l 1
 ```
 
-## The cookie problem
+## Two permissions, two groups
 
-A system-mode PulseAudio issues a shared cookie at `/etc/pulse/cookie`, owned
-`pulse:pulse` mode `0600`. A client has to present it to connect. An
-unprivileged client that is a member of the `pulse` group still cannot read a
-`0600` file owned by someone else, so the connection is refused with a
-permission error that does not obviously say "cookie".
+Getting an unprivileged client talking to a system-mode PulseAudio needs **both**
+of these, and they are different groups. This is the part that is easy to get
+wrong, and both were verified in PulseAudio's source:
 
-Rather than run the Spotify daemon as root, the init script widens the cookie to
-`0640 pulse:pulse` before starting it, which is enough for a group member to read
-and no more. If you would rather not touch it, set **Run as root** in LuCI and
-the daemon will be able to read it directly.
+**1. The `audio` group — client authorization.**
 
-## Privileges
+OpenWrt builds PulseAudio with:
 
-The package creates a `soloist` user and adds it to `audio` and `pulse`:
+```
+-Daccess_group=audio
+```
+
+and `module-native-protocol-unix` falls back to that group for authorization in
+system mode (`protocol-native.c`):
+
+```c
+o->auth_group = enabled ? pa_xstrdup(pa_modargs_get_value(ma, "auth-group",
+                    pa_in_system_mode() ? PA_ACCESS_GROUP : NULL)) : NULL;
+```
+
+A connecting client is accepted if its uid matches, or if its gid *is* the access
+group, or if it is a member of it (`pa_uid_in_group`). So on OpenWrt the group
+that gets a client past authentication is **`audio`**, not `pulse`.
+
+That matters because `base-files` ships no `audio` group at all, and
+`pulseaudio-daemon` does not create one either — it only declares `pulse=51`.
+This package's `USERID` line is therefore what brings the group into existence:
 
 ```
 USERID:=soloist=soloist:audio=29,pulse
 ```
 
-- `pulse` — readable cookie and connectable socket
-- `audio` — only relevant if something needs `/dev/snd` directly; with
-  PulseAudio the sound server owns those nodes, not the client
+**2. The `pulse` group — reaching the socket.**
 
-`procd_set_param user` calls `initgroups()`, which reads `/etc/group`, so both
-supplementary memberships apply. Setting **Run as root** bypasses all of this and
-is intended purely as a diagnostic step.
+OpenWrt's PulseAudio init creates the runtime directory with:
+
+```sh
+mkdir -m 0755 -p /var/run/pulse
+chmod 0750 /var/run/pulse
+chown pulse:pulse /var/run/pulse
+```
+
+`0750 pulse:pulse` means a client that is not `pulse` and not in the `pulse`
+group cannot traverse into the directory, so it never reaches `/var/run/pulse/native`
+regardless of authorization. Hence the second group.
+
+**3. The cookie.**
+
+System-mode PulseAudio also writes a shared cookie, and a client normally
+presents it. It is owned by the `pulse` user with restrictive permissions, which
+an unprivileged client cannot read, so the init script widens it to `0640` with
+group `audio` before starting the daemon:
+
+```sh
+chgrp audio "$cookie"
+chmod 0640 "$cookie"
+```
+
+**In practice**, authentication succeeds on the group check alone before the
+cookie is ever compared, so the cookie step is belt-and-braces. It is kept
+because it costs nothing and covers the case where `auth-group` has been turned
+off in `system.pa`.
+
+If none of this works, set **Run as root** in LuCI: the daemon then matches
+PulseAudio's own uid check (`creds->uid == getuid()`) and every group question
+disappears. That is a diagnostic, not a deployment.
+
+## Privileges, summarized
+
+| Group | Why | Exists by default? |
+|---|---|---|
+| `audio` (gid 29) | PulseAudio client authorization (`access_group=audio`) | **No** — created by this package's `USERID` |
+| `pulse` | traverse `/var/run/pulse` (mode `0750 pulse:pulse`) | Yes — created by `pulseaudio-daemon` |
+
+`procd_set_param user` calls `initgroups()` against `/etc/group`, so both
+supplementary memberships apply to the daemon.
 
 ## Summary of what is configurable
 

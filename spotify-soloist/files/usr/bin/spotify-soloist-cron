@@ -1,0 +1,111 @@
+#!/bin/sh
+#
+# spotify-soloist-cron -- keep the crontab entry in sync with the UCI config.
+#
+# The schedule is a UCI option, so changing it in LuCI has to actually change
+# the crontab. The package's postinst cannot do that on its own: it runs once,
+# while the schedule can be edited at any time afterwards. This script is the
+# single place that writes the entry, and it is called whenever the config is
+# applied as well as at service start.
+#
+# The entry is rebuilt from scratch rather than patched, so a hand-edited or
+# duplicated line does not survive.
+
+. /usr/lib/spotify-soloist/common.sh
+
+CRONTAB_FILE="/etc/crontabs/root"
+MARK="spotify-soloist-check"
+
+config_load spotify-soloist
+config_get_bool auto_update main auto_update 1
+config_get schedule main check_update_cron "17 4 * * 0"
+
+# cron accepts five fields followed by the command. Anything else would make
+# busybox crond reject the whole file, so refuse to write a broken line.
+validate_schedule() {
+	local f1 f2 f3 f4 f5 rest
+	set -- $schedule
+	f1="$1"; f2="$2"; f3="$3"; f4="$4"; f5="$5"; rest="$6"
+
+	[ -n "$f1" ] && [ -n "$f2" ] && [ -n "$f3" ] && [ -n "$f4" ] && [ -n "$f5" ] || return 1
+	[ -z "$rest" ] || return 1
+
+	# Each field is digits with the usual * , - / operators.
+	local f
+	for f in "$f1" "$f2" "$f3" "$f4" "$f5"; do
+		case "$f" in
+			*[!0-9*,\-/]*) return 1 ;;
+		esac
+	done
+	return 0
+}
+
+remove_entry() {
+	[ -f "$CRONTAB_FILE" ] || return 0
+	if grep -q "$MARK" "$CRONTAB_FILE" 2>/dev/null; then
+		grep -v "$MARK" "$CRONTAB_FILE" > "${CRONTAB_FILE}.tmp" 2>/dev/null &&
+			mv "${CRONTAB_FILE}.tmp" "$CRONTAB_FILE"
+	fi
+	return 0
+}
+
+add_entry() {
+	# Make sure the file and its directory exist: /etc/crontabs is created by
+	# the cron package, which may not have been installed yet.
+	mkdir -p "$(dirname "$CRONTAB_FILE")"
+	[ -f "$CRONTAB_FILE" ] || : > "$CRONTAB_FILE"
+
+	# A cron file without a trailing newline swallows the next line.
+	[ -s "$CRONTAB_FILE" ] && [ "$(tail -c 1 "$CRONTAB_FILE" | wc -l)" = "0" ] &&
+		echo "" >> "$CRONTAB_FILE"
+
+	echo "${schedule} /usr/bin/spotify-soloist-check" >> "$CRONTAB_FILE"
+	return 0
+}
+
+restart_cron() {
+	[ -x /etc/init.d/cron ] && /etc/init.d/cron restart >/dev/null 2>&1
+	return 0
+}
+
+case "${1:-sync}" in
+	sync)
+		if [ "$auto_update" != "1" ]; then
+			# Updates are off, so the check has nothing to do. Removing the
+			# entry keeps the crontab honest rather than leaving a no-op job.
+			remove_entry
+			restart_cron
+			log_msg "automatic updates are off: no cron entry" user.info
+			exit 0
+		fi
+
+		if ! validate_schedule; then
+			log_msg "refusing to install an invalid cron schedule: '${schedule}'" user.err
+			log_msg "expected five fields, for example '17 4 * * 0'" user.err
+			exit 1
+		fi
+
+		remove_entry
+		add_entry
+		restart_cron
+		log_msg "cron entry set: ${schedule} /usr/bin/spotify-soloist-check" user.info
+		;;
+
+	remove)
+		remove_entry
+		restart_cron
+		;;
+
+	show)
+		if [ -f "$CRONTAB_FILE" ]; then
+			grep "$MARK" "$CRONTAB_FILE" 2>/dev/null
+		fi
+		;;
+
+	*)
+		echo "usage: spotify-soloist-cron [sync|remove|show]" >&2
+		exit 1
+		;;
+esac
+
+exit 0

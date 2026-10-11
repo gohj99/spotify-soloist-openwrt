@@ -137,7 +137,8 @@ days_from_civil() {
 
 # Remaining days before the build expires. Prints -1 when unknown.
 soloist_days_remaining() {
-	local build= now=
+	local build now
+
 	build=$(soloist_build_epoch) || {
 		echo "-1"
 		return 1
@@ -149,6 +150,49 @@ soloist_days_remaining() {
 	}
 
 	echo $(( (build + SOLOIST_BUILD_TTL_DAYS * 86400 - now) / 86400 ))
+}
+
+# Remaining days for an explicit build timestamp.
+soloist_days_remaining_for_epoch() {
+	local build="$1" now
+
+	now=$(date +%s 2>/dev/null) || {
+		echo "-1"
+		return 1
+	}
+
+	echo $(( (build + SOLOIST_BUILD_TTL_DAYS * 86400 - now) / 86400 ))
+}
+
+# PID of the running daemon, or an empty string.
+#
+# Reads the pid file the daemon writes rather than scanning the process table:
+# `pkill` is not in OpenWrt's default busybox build, and matching on the command
+# line risks catching something unrelated. `pgrep` is available by default, so it
+# is used only as a cross-check that the pid is really alive.
+soloist_running_pid() {
+	local pidfile="${SOLOIST_DATA_DIR}/soloist.pid"
+	local pid=""
+
+	if [ -r "$pidfile" ]; then
+		pid=$(cat "$pidfile" 2>/dev/null | tr -dc '0-9')
+	fi
+
+	if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+		echo "$pid"
+		return 0
+	fi
+
+	# The pid file is missing or stale. Try the procd instance instead.
+	if command -v pgrep >/dev/null 2>&1; then
+		pid=$(pgrep -f "${SOLOIST_BIN}" 2>/dev/null | head -n 1)
+		if [ -n "$pid" ]; then
+			echo "$pid"
+			return 0
+		fi
+	fi
+
+	return 1
 }
 
 # Human-readable version + expiry, cached in /tmp for LuCI to read cheaply.

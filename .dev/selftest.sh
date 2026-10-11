@@ -44,8 +44,9 @@ else
 	warn "luci-app-spotify-soloist is not installed (CLI still works)"
 fi
 
-for p in pulseaudio-daemon libpulse curl ca-bundle; do
-	opkg list-installed 2>/dev/null | grep -q "^$p " && ok "$p" || bad "$p missing"
+for p in pulseaudio-daemon pulseaudio-tools libpulse curl ca-bundle \
+         kmod-sound-core kmod-usb-audio; do
+	opkg list-installed 2>/dev/null | grep -q "^$p " && ok "$p" || warn "$p missing"
 done
 
 # ---------------------------------------------------------------------------
@@ -160,6 +161,37 @@ fi
 
 if [ -S /var/run/pulse/native ]; then
 	ok "pulseaudio socket present"
+else
+	warn "no /var/run/pulse/native socket"
+fi
+
+# The group checks below are the ones that actually decide whether an
+# unprivileged client can talk to PulseAudio, and they are easy to get wrong.
+# See docs/audio-output.md.
+if grep -q '^audio:' /etc/group; then
+	ok "audio group exists: $(grep '^audio:' /etc/group)"
+else
+	bad "no audio group -- PulseAudio is built with access_group=audio, so no client can authenticate"
+fi
+
+if [ -n "$(id -Gn soloist 2>/dev/null)" ]; then
+	groups_of_soloist=$(id -Gn soloist 2>/dev/null)
+	case " $groups_of_soloist " in
+		*" audio "*) ok "soloist is in the audio group (PulseAudio authorization)" ;;
+		*) bad "soloist is NOT in the audio group; PulseAudio will refuse it. groups: $groups_of_soloist" ;;
+	esac
+	case " $groups_of_soloist " in
+		*" pulse "*) ok "soloist is in the pulse group (can traverse /var/run/pulse)" ;;
+		*) warn "soloist is NOT in the pulse group; /var/run/pulse is 0750 pulse:pulse. groups: $groups_of_soloist" ;;
+	esac
+else
+	warn "the soloist user does not exist; the daemon will run as root"
+fi
+
+# Does the daemon's runtime directory actually let it in?
+if [ -d /var/run/pulse ]; then
+	perm=$(ls -ld /var/run/pulse 2>/dev/null | awk '{print $1, $3":"$4}')
+	echo "        /var/run/pulse: $perm"
 fi
 
 if [ -x /usr/bin/pactl ]; then

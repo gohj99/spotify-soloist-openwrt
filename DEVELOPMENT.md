@@ -121,8 +121,19 @@ silently renders nothing.
 **`procd_set_param env` takes `VAR=value` pairs**, not two arguments. It builds a
 JSON object, so `env PULSE_SERVER unix:...` produces a key with no value.
 
-**`respawn` is three numbers**: `threshold timeout retry`, and retry `0` means
-unlimited. `respawn 3600 5 0` gives up after 5 seconds of uptime, 3600 times.
+**`respawn` is three numbers**: `threshold timeout retry`. An instance that dies
+within `threshold` seconds counts as a crash, `timeout` is the delay before the
+restart, and after `retry` consecutive crashes procd gives up — but only if
+`retry` is non-zero, because `0` means retry forever. The package uses
+`respawn 3600 5 5`: a crash inside the first hour counts, restart after five
+seconds, and give up after five in a row. Retrying forever is wrong here because
+Soloist exits 1 on a bad API key or an unwritable data directory, and neither
+condition resolves itself.
+
+**Busybox does not ship everything.** `od`, `pkill`, `stat` and `paste` are all
+`default n` in OpenWrt's busybox config. Anything relying on them has to guard
+with `command -v` and degrade gracefully. `pgrep`, `pidof`, `flock`, `sha256sum`
+and the usual coreutils are `y` and safe.
 
 **The API key must not go through a shell argument.** It would be visible in
 `ps`. `spotify-soloist-set-key` reads it from a file instead.
