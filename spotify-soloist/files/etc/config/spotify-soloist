@@ -1,13 +1,86 @@
 
+# Spotify Soloist configuration.
+#
+# Soloist itself has no configuration file; every option here maps onto a
+# command line flag that /etc/init.d/spotify-soloist builds. The API key is not
+# stored in UCI because it is a secret with no business being in a world
+# readable file -- it lives in /etc/spotify-soloist/api-key instead.
+
 config spotify-soloist 'main'
+	# Master switch. The service stays stopped until this is 1.
 	option enabled '0'
-	option device_name 'OpenWrt Spotify'
-	option ws_enabled '1'
-	option ws_port '8080'
+
+	# --- identity ---------------------------------------------------------
+	# Name shown in the Spotify Connect device picker. Empty means the
+	# router's hostname.
+	option device_name ''
+
+	# --- pairing ----------------------------------------------------------
+	# Run once in pairing mode (authenticate through the Spotify app, store
+	# the session in the data directory, then stop again). Turn this on for
+	# one boot if you would rather pair unattended than start a normal run.
+	option require_pair '0'
+
+	# --- audio ------------------------------------------------------------
+	# auto | pulseaudio | pipewire
+	#
+	# Soloist only ever hands audio to a sound server. No Spotify build links
+	# ALSA or JACK, so there is deliberately no "direct to the card" option
+	# here: a USB DAC or the 3.5 mm jack is chosen by the sound server, which
+	# is what the alsa_output setting below selects.
+	option audio_backend 'auto'
+
+	# Which sound card the output should come from, as listed in
+	# /proc/asound/cards: "auto", "hw:0", "hw:1", or a card id.
+	# The init script resolves this to the sound server's sink name so only
+	# this daemon is pinned to it.
+	option alsa_output 'auto'
+
+	# PipeWire node name or numeric id, used with the pipewire backend only.
+	# Find candidates with: wpctl status  /  pw-cli ls Node
+	# Leave empty to follow alsa_output instead.
+	option pipewire_device ''
+
+	# 0-100. Spotify's build defaults to 40 when this is omitted.
+	option initial_volume '40'
+
+	# --- storage ----------------------------------------------------------
+	# Device identity, paired session and crash reports. This must persist
+	# across reboots or the speaker has to be paired again.
+	option data_dir '/etc/spotify-soloist/data'
+
+	# Playback cache. Defaults to tmpfs on purpose: it is rebuildable and
+	# routers usually have far more RAM than free flash.
+	option cache_dir '/tmp/spotify-soloist/cache'
+
+	# Maximum cache size in MB. 0 means unlimited; Spotify rejects any
+	# value below 100.
+	option cache_size '0'
+
+	# --- web socket api ---------------------------------------------------
+	# Off by default. The API has no authentication whatsoever, so it is
+	# only ever worth enabling on the loopback interface.
+	option ws_enabled '0'
+	option ws_address '127.0.0.1'
+	option ws_port '9090'
+
+	# --- updates ----------------------------------------------------------
+	# Spotify expires every build 90 days after it was built. With this on,
+	# a weekly check downloads a fresh build before that happens.
 	option auto_update '1'
-	option check_update_cron '0 3 * * 0'
 	option update_threshold '15'
-	option cache_size_limit '512'
-	option bitrate 'default'
-	option normalize_volume '0'
-	option log_level 'info'
+	option update_notify_only '0'
+
+	# --- privileges and logging -------------------------------------------
+	# Run as the unprivileged "soloist" user. The package adds that user to
+	# the audio and pulse groups so it can still reach the sound device.
+	# Set to 1 only when debugging a permission problem.
+	option run_as_root '0'
+
+	# Verbose logging (--verbose).
+	option verbose '0'
+
+	# --- internal ---------------------------------------------------------
+	# Cron schedule for the update check. Written out on install and
+	# whenever settings are saved from the LuCI page.
+	option check_update_cron '17 4 * * 0'

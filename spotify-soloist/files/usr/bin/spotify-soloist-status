@@ -1,0 +1,114 @@
+#!/bin/sh
+#
+# spotify-soloist-status -- one-shot JSON status report for the LuCI page.
+#
+# Everything the web interface needs, in a single call, so the browser does not
+# have to shell out repeatedly. Prints a JSON object on stdout.
+
+. /usr/lib/spotify-soloist/common.sh
+
+json_escape() {
+	printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/\\t/g' |
+		tr -d '\r\n'
+}
+
+jstr() {
+	printf '"%s":"%s"' "$1" "$(json_escape "$2")"
+}
+
+config_load spotify-soloist
+config_get_bool enabled main enabled 0
+config_get device_name main device_name ""
+config_get backend main audio_backend auto
+config_get alsa_output main alsa_output auto
+config_get ws_enabled main ws_enabled 0
+config_get ws_port main ws_port 9090
+config_get_bool auto_update main auto_update 1
+config_get threshold main update_threshold 15
+config_get data_dir main data_dir "${SOLOIST_DATA_DIR}"
+
+[ -n "$device_name" ] || device_name="$(uname -n)"
+
+# Running?
+running=false
+pid=""
+if pgrep -f "$SOLOIST_BIN" >/dev/null 2>&1; then
+	running=true
+	pid=$(pgrep -f "$SOLOIST_BIN" | head -n 1)
+fi
+
+# Installed?
+installed=false
+version=""
+[ -x "$SOLOIST_BIN" ] && installed=true
+[ "$installed" = true ] && version=$("$SOLOIST_BIN" --version 2>/dev/null)
+
+# Expiry. Prefer the cached meta so a page load does not execute the binary,
+# but fall back to computing it when the cache is cold.
+days=$(soloist_meta_get days_remaining)
+expires_epoch=$(soloist_meta_get expires_epoch)
+
+if [ -z "$days" ] || [ -z "$expires_epoch" ]; then
+	build=$(soloist_build_epoch)
+	if [ -n "$build" ]; then
+		expires_epoch=$(( build + SOLOIST_BUILD_TTL_DAYS * 86400 ))
+		now=$(date +%s)
+		days=$(( (expires_epoch - now) / 86400 ))
+	fi
+fi
+
+case "$days" in
+	''|*[!0-9-]*) days=-1 ;;
+esac
+case "$expires_epoch" in
+	''|*[!0-9]*) expires_epoch=0 ;;
+esac
+
+key_present=false
+soloist_api_key_present && key_present=true
+
+# The login state lives only in the WebSocket API, which is off by default.
+logged_in="unknown"
+ws_endpoint=""
+if [ "$ws_enabled" = "1" ]; then
+	if [ -f "${data_dir}/ws.port" ]; then
+		ws_endpoint="$(cat "${data_dir}/ws.addr" 2>/dev/null):$(cat "${data_dir}/ws.port" 2>/dev/null)"
+	fi
+	if [ "$running" = true ]; then
+		state=$(/usr/sbin/soloist ctl -D "$data_dir" status 2>/dev/null |
+			sed -n 's/^  logged in: *//p' | head -n 1)
+		[ -n "$state" ] && logged_in="$state"
+	fi
+fi
+
+# Architecture support: Spotify only ever publishes glibc builds.
+case "$(uname -m)" in
+	aarch64|arm64|armv7l|armv6l|armv7|arm|x86_64|amd64)
+		arch_supported=true
+		;;
+	*)
+		arch_supported=false
+		;;
+esac
+
+printf '{'
+printf '%s,' "$(jstr running "$running")"
+printf '%s,' "$(jstr pid "$pid")"
+printf '%s,' "$(jstr installed "$installed")"
+printf '%s,' "$(jstr version "$version")"
+printf '%s,' "$(jstr days_remaining "$days")"
+printf '%s,' "$(jstr expires_epoch "$expires_epoch")"
+printf '%s,' "$(jstr enabled "$enabled")"
+printf '%s,' "$(jstr device_name "$device_name")"
+printf '%s,' "$(jstr backend "$backend")"
+printf '%s,' "$(jstr alsa_output "$alsa_output")"
+printf '%s,' "$(jstr ws_enabled "$ws_enabled")"
+printf '%s,' "$(jstr ws_endpoint "$ws_endpoint")"
+printf '%s,' "$(jstr logged_in "$logged_in")"
+printf '%s,' "$(jstr api_key_present "$key_present")"
+printf '%s,' "$(jstr auto_update "$auto_update")"
+printf '%s,' "$(jstr update_threshold "$threshold")"
+printf '%s,' "$(jstr data_dir "$data_dir")"
+printf '%s,' "$(jstr arch_supported "$arch_supported")"
+printf '%s' "$(jstr arch "$(uname -m)")"
+printf '}\n'

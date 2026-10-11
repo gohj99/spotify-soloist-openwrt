@@ -1,102 +1,121 @@
 #!/bin/sh
-# Spotify Soloist Expiration Checker
-# Checks remaining days and triggers update if needed
+#
+# spotify-soloist-check -- periodic expiry check, started from cron.
+#
+# Spotify Soloist builds stop working 90 days after their build date and then
+# exit with status 10, so something has to notice before that happens. This
+# script is what cron runs; it decides whether to call the updater now.
 
-LOG_TAG="spotify-soloist-check"
-SOLOIST_BIN="/usr/sbin/soloist"
-UPDATE_SCRIPT="/usr/bin/spotify-soloist-updater"
+. /usr/lib/spotify-soloist/common.sh
 
-# Get remaining days from soloist binary
-get_remaining_days() {
-	if [ ! -x "$SOLOIST_BIN" ]; then
-		echo "-1"
-		return 1
-	fi
+usage() {
+	cat <<'EOF'
+Usage: spotify-soloist-check [options]
 
-	# Try to get version info and extract build date
-	local version_output
-	version_output=$("$SOLOIST_BIN" --version 2>&1 || true)
+  (no option)   Check expiry and update if the threshold is reached.
+  --days        Print the number of days remaining (may be negative).
+  --force       Update now, regardless of the remaining time.
+  --install     Install the binary if it is missing, then exit.
+  --help        This message.
 
-	# Try to extract remaining days from logs
-	local log_output
-	log_output=$(logread | grep -i "soloist" | grep -iE "(expire|remaining|days left)" | tail -n 5)
-
-	# Parse days from various possible formats
-	local days=-1
-
-	# Try pattern: "X days remaining"
-	days=$(echo "$log_output" | grep -oE "[0-9]+ days? remaining" | grep -oE "[0-9]+" | head -n 1)
-	if [ -z "$days" ]; then
-		# Try pattern: "expires in X days"
-		days=$(echo "$log_output" | grep -oE "expires? in [0-9]+ days?" | grep -oE "[0-9]+" | head -n 1)
-	fi
-
-	if [ -z "$days" ] || [ "$days" -eq 0 ]; then
-		# If no log info, calculate from binary build date if available
-		# This is a fallback - actual implementation may need adjustment
-		days=-1
-	fi
-
-	echo "${days:-90}"
+Exit codes:
+  0  nothing to do, or the update succeeded
+  1  an update was needed but could not be completed
+  2  the service is disabled in the configuration
+  3  the binary is missing or expired beyond recovery
+EOF
 }
 
-# Check if update is needed
-check_and_update() {
-	local threshold
-	local auto_update
+log_msg "check started"
 
-	# Load config
-	. /lib/functions.sh
-	config_load spotify-soloist
-	config_get threshold main update_threshold 15
-	config_get_bool auto_update main auto_update 1
+config_load spotify-soloist
+config_get_bool enabled main enabled 1
+config_get_bool auto_update main auto_update 1
+config_get threshold main update_threshold 15
+config_get_bool notify_only main update_notify_only 0
 
-	logger -t "$LOG_TAG" "Checking expiration status"
-
-	# Get remaining days
-	local remaining
-	remaining=$(get_remaining_days)
-
-	if [ "$remaining" -eq -1 ]; then
-		logger -t "$LOG_TAG" -p user.warn "Could not determine remaining days"
-		# If binary doesn't exist, try to download
-		if [ ! -x "$SOLOIST_BIN" ]; then
-			logger -t "$LOG_TAG" "Binary not found, downloading"
-			"$UPDATE_SCRIPT"
-			return $?
-		fi
-		return 0
-	fi
-
-	logger -t "$LOG_TAG" "Remaining days: $remaining"
-
-	# Check if update is needed
-	if [ "$remaining" -le "$threshold" ]; then
-		if [ "$auto_update" -eq 1 ]; then
-			logger -t "$LOG_TAG" "Remaining days ($remaining) below threshold ($threshold), triggering update"
-			"$UPDATE_SCRIPT"
-			return $?
-		else
-			logger -t "$LOG_TAG" -p user.warn "Update needed but auto_update is disabled"
-			echo "WARNING: Spotify Soloist will expire in $remaining days. Run: $UPDATE_SCRIPT"
-			return 1
-		fi
-	else
-		logger -t "$LOG_TAG" "No update needed (remaining: $remaining days)"
-		return 0
-	fi
-}
-
-# Main
-case "$1" in
+case "${1:-}" in
+	--help|-h)
+		usage
+		exit 0
+		;;
 	--days)
-		get_remaining_days
+		# Machine readable; no logging noise on stdout.
+		SOLOIST_QUIET=1
+		soloist_days_remaining
+		exit 0
+		;;
+	--install)
+		/usr/bin/spotify-soloist-updater
+		exit $?
 		;;
 	--force)
-		logger -t "$LOG_TAG" "Forcing update"
-		"$UPDATE_SCRIPT"
+		/usr/bin/spotify-soloist-updater --force
+		exit $?
 		;;
+	"") ;;
 	*)
-		check_and_update
+		usage >&2
+		exit 1
 		;;
 esac
+
+if [ "$enabled" != "1" ]; then
+	log_msg "service is disabled, nothing to do"
+	exit 2
+fi
+
+# First run after installation: fetch the binary.
+if ! soloist_install_ready; then
+	log_msg "no binary installed yet, downloading"
+	/usr/bin/spotify-soloist-updater
+	exit $?
+fi
+
+soloist_write_meta
+
+days=$(soloist_days_remaining)
+version=$(soloist_meta_get version)
+
+if [ "$days" -lt 0 ] 2>/dev/null; then
+	log_msg "could not determine the build date of ${version}" user.warn
+	exit 3
+fi
+
+log_msg "installed build expires in ${days} days"
+
+if [ "$days" -le 0 ]; then
+	log_msg "build has already expired; the service will not start until it is updated" user.err
+	if [ "$auto_update" = "1" ]; then
+		/usr/bin/spotify-soloist-updater --force
+		exit $?
+	fi
+	exit 3
+fi
+
+if [ "$days" -gt "$threshold" ] 2>/dev/null; then
+	log_msg "no update needed (threshold ${threshold} days)"
+	exit 0
+fi
+
+log_msg "within ${threshold} days of expiry"
+
+if [ "$auto_update" != "1" ]; then
+	log_msg "automatic updates are disabled; run the updater by hand" user.warn
+	exit 1
+fi
+
+if [ "$notify_only" = "1" ]; then
+	log_msg "notify-only mode: skipping the download" user.notice
+	exit 1
+fi
+
+/usr/bin/spotify-soloist-updater
+rc=$?
+
+if [ "$rc" = "0" ]; then
+	log_msg "update finished, restarting the service if needed" user.notice
+	/etc/init.d/spotify-soloist restart >/dev/null 2>&1
+fi
+
+exit $rc

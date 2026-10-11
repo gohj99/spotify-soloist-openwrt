@@ -1,187 +1,168 @@
 # Spotify Soloist for OpenWrt
 
-Complete Spotify Connect integration for OpenWrt routers.
+Run [Spotify Soloist](https://developer.spotify.com/documentation/soloist) as a
+service on OpenWrt, with a LuCI configuration page.
 
 [中文文档](README.md) | **English**
 
-## Introduction
+---
 
-This project provides full Spotify Soloist integration for OpenWrt, including:
+## Read this first
 
-- **spotify-soloist**: Core service package with binary management and auto-update mechanism
-- **luci-app-spotify-soloist**: Web management interface
+**Spotify publishes glibc builds only; OpenWrt uses musl.** On a stock OpenWrt
+image the Soloist binary cannot execute, so this package is marked unavailable
+there and cannot be installed.
 
-### Key Features
+It works on an OpenWrt image built with `CONFIG_USE_GLIBC=y`, or on any glibc
+Linux host — Spotify's own reference was a Raspberry Pi on Raspberry Pi OS. On
+stock OpenWrt, `librespot` is the working alternative. See
+[docs/limitations.md](docs/limitations.md).
 
-✅ **Auto-Update Mechanism** - Solves Spotify's 90-day expiration limitation  
-✅ **LuCI Web Interface** - Visual configuration and status monitoring  
-✅ **Multi-Architecture Support** - ARMv7, ARMv8/AArch64, x86_64  
-✅ **WebSocket API** - Local integration interface  
-✅ **UCI Configuration** - Standard OpenWrt configuration management  
-✅ **Procd Integration** - Auto-restart and process monitoring  
+Also note **Soloist cannot talk to a sound card directly**: no build links ALSA
+or JACK, so audio goes through PipeWire or PulseAudio. Routing to a USB DAC or
+the 3.5 mm jack is covered in [docs/audio-output.md](docs/audio-output.md).
 
-## Requirements
+---
 
-- OpenWrt 21.02 or newer
-- Supported architectures: ARMv7, ARMv8/AArch64, x86_64
-- At least 50MB free storage
-- Internet connection (for binary downloads and updates)
-- PulseAudio or PipeWire audio system
+## Features
 
-## Quick Start
+- Runs Soloist under procd with UCI configuration
+- Stores the API key as a `0600` file instead of world-readable config
+- Handles the **90-day build expiry**: scheduled updates, plus a refusal to start
+  an expired binary so procd does not respawn it indefinitely
+- Translates the attached sound card into the sound server's sink name, so
+  choosing an output is a single setting
+- LuCI page with status, remaining lifetime and the update log
 
-### Installation
+## Packages
+
+| Package | Contents |
+|---|---|
+| `spotify-soloist` | service wrapper, updater, expiry checker, audio helper, UCI config |
+| `luci-app-spotify-soloist` | the LuCI page; depends on the above |
+
+The binary is not bundled — Spotify asks that the archives not be redistributed,
+so it is downloaded on the device.
+
+## Installation
 
 ```bash
-# Copy packages to router
-scp spotify-soloist_*.ipk luci-app-spotify-soloist_*.ipk root@192.168.1.1:/tmp/
-
-# SSH to router
-ssh root@192.168.1.1
-
-# Install
-opkg install /tmp/spotify-soloist_*.ipk
-opkg install /tmp/luci-app-spotify-soloist_*.ipk
+SDK_PATH=/path/to/openwrt-sdk ./build.sh
+./install.sh
 ```
 
-### Configuration
-
-**Via LuCI Web Interface:**
-
-1. Navigate to: Services → Spotify Soloist
-2. Enable the service
-3. Set device name
-4. Save & Apply
-
-**Via Command Line:**
+Or manually:
 
 ```bash
+scp spotify-soloist_*.ipk luci-app-spotify-soloist_*.ipk root@192.168.1.1:/tmp/
+ssh root@192.168.1.1
+opkg install /tmp/spotify-soloist_*.ipk /tmp/luci-app-spotify-soloist_*.ipk
+```
+
+## Configuration
+
+Get an API key at <https://developer.spotify.com/dashboard/soloist> — this
+requires a **Spotify Premium** account.
+
+Then in LuCI under **Services → Spotify Soloist**: paste the key, enable the
+service, pick the output device, Save & Apply.
+
+From the shell:
+
+```bash
+echo 'YOUR_API_KEY' > /tmp/k
+/usr/bin/spotify-soloist-set-key /tmp/k
+
 uci set spotify-soloist.main.enabled='1'
-uci set spotify-soloist.main.device_name='OpenWrt Speaker'
+uci set spotify-soloist.main.device_name='Kitchen'
+uci set spotify-soloist.main.alsa_output='hw:1'
 uci commit spotify-soloist
 /etc/init.d/spotify-soloist enable
 /etc/init.d/spotify-soloist start
 ```
 
-### Usage
+## Usage
 
-1. Open Spotify app on your phone/computer
-2. Play any song
-3. Tap the **Devices** button
-4. Select your OpenWrt device
-5. 🎵 Enjoy your music!
+Open the Spotify app on the same network, play something, and select your device
+in the device picker. Pairing is stored in the data directory.
 
-## Documentation
+### Commands
 
-- [Quick Start Guide](QUICKSTART.md)
-- [Architecture Design](docs/architecture.md)
-- [Development Guide](DEVELOPMENT.md)
-- [Contributing Guide](CONTRIBUTING.md)
-- [Changelog](CHANGELOG.md)
+```bash
+/etc/init.d/spotify-soloist start|stop|restart|enable|disable
+/etc/init.d/spotify-soloist info
+/usr/bin/spotify-soloist-updater --force
+/usr/bin/spotify-soloist-check --days
+/usr/bin/spotify-soloist-audio --list
+```
 
-## Configuration Options
+## Configuration options
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `enabled` | Boolean | `0` | Enable service |
-| `device_name` | String | `OpenWrt Spotify` | Device name in Spotify Connect |
-| `ws_enabled` | Boolean | `1` | Enable WebSocket API |
-| `ws_port` | Integer | `8080` | WebSocket port |
-| `auto_update` | Boolean | `1` | Enable auto-update |
-| `update_threshold` | Integer | `15` | Update threshold (days) |
-| `bitrate` | String | `default` | Audio bitrate |
-| `cache_size_limit` | Integer | `512` | Cache size limit (MB) |
+| Option | Default | Meaning |
+|---|---|---|
+| `enabled` | `0` | start the service |
+| `device_name` | hostname | name in the Spotify Connect picker |
+| `audio_backend` | `auto` | `auto`, `pulseaudio` or `pipewire` |
+| `alsa_output` | `auto` | which sound card to play from, e.g. `hw:1` |
+| `pipewire_device` | — | PipeWire node name or id |
+| `initial_volume` | `40` | volume at startup, 0–100 |
+| `data_dir` | `/etc/spotify-soloist/data` | identity and paired session |
+| `cache_dir` | `/tmp/spotify-soloist/cache` | playback cache, on tmpfs |
+| `cache_size` | `0` | MB; `0` unlimited, otherwise ≥ 100 |
+| `ws_enabled` | `0` | the WebSocket API |
+| `ws_address` | `127.0.0.1` | leave on loopback |
+| `ws_port` | `9090` | `0` picks a free port |
+| `auto_update` | `1` | download new builds before expiry |
+| `update_threshold` | `15` | days remaining before updating |
+| `check_update_cron` | `17 4 * * 0` | when the check runs |
+| `run_as_root` | `0` | diagnostic only |
 
-## Auto-Update Mechanism
+## The 90-day expiry
 
-Spotify Soloist binaries expire after 90 days. This project solves it through:
+Spotify expires every build 90 days after it was built; an expired build exits
+with status `10`. There is no way to bypass this. What the package does:
 
-1. **Scheduled Checks** (Cron) - Weekly by default
-2. **Threshold Trigger** - Auto-update when remaining days ≤ threshold
-3. **Manual Update** - Web interface and CLI support
+1. a weekly cron check reads the build timestamp from `soloist --version`
+2. once 15 days remain, a fresh build is downloaded and verified
+3. the service restarts only if the new build comes up cleanly, otherwise the
+   previous binary is restored
+4. the LuCI page warns at 30 and 15 days
+
+The requirement this creates: the router needs internet access at least once
+every 90 days, or the speaker stops.
 
 ## Troubleshooting
 
-### Device not visible in Spotify
-
 ```bash
-# Check service status
-/etc/init.d/spotify-soloist status
-
-# View logs
-logread | grep soloist
+logread | grep -i soloist | tail -30
+cat /proc/asound/cards
+pactl list short sinks
 ```
 
-### Service fails to start
+Further detail in [QUICKSTART.md](QUICKSTART.md) and
+[docs/limitations.md](docs/limitations.md).
 
-```bash
-# Download binary manually
-/usr/bin/spotify-soloist-updater
+## Documentation
 
-# Restart service
-/etc/init.d/spotify-soloist restart
-```
+| Document | Contents |
+|---|---|
+| [docs/limitations.md](docs/limitations.md) | the musl problem, expiry, what will not work |
+| [docs/audio-output.md](docs/audio-output.md) | USB DAC, 3.5 mm jack, HDMI |
+| [docs/soloist-reference.md](docs/soloist-reference.md) | verified flags, exit codes, download URLs |
+| [docs/architecture.md](docs/architecture.md) | how the pieces fit together |
+| [QUICKSTART.md](QUICKSTART.md) | the short version |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | how to contribute |
 
-### Check remaining days
+## Note on accuracy
 
-```bash
-# Command line
-/usr/bin/spotify-soloist-check --days
+An earlier draft of this project documented options that do not exist
+(`--bitrate`, `--log-level`, `--enable-volume-normalisation`) and invented
+download URLs. Those have been removed. Everything in
+[docs/soloist-reference.md](docs/soloist-reference.md) is verified against the
+shipped binaries and Spotify's documentation.
 
-# Or check in LuCI interface
-```
+## Licence
 
-## Building from Source
-
-```bash
-# Download OpenWrt SDK
-wget https://downloads.openwrt.org/releases/23.05.0/targets/<target>/<subtarget>/openwrt-sdk-*.tar.xz
-tar xf openwrt-sdk-*.tar.xz
-cd openwrt-sdk-*
-
-# Clone this repository
-git clone https://github.com/yourusername/spotify-soloist-openwrt.git package/spotify-soloist-openwrt
-
-# Build
-make package/spotify-soloist-openwrt/spotify-soloist/compile V=s
-make package/spotify-soloist-openwrt/luci-app-spotify-soloist/compile V=s
-```
-
-## Contributing
-
-Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-## License
-
-- **spotify-soloist**: Proprietary (Spotify)
-- **luci-app-spotify-soloist**: MIT License
-
-## Acknowledgments
-
-- [Spotify](https://www.spotify.com/) - For providing Soloist client
-- [OpenWrt Project](https://openwrt.org/)
-- [LuCI](https://github.com/openwrt/luci)
-
-## Links
-
-- [Spotify Soloist Documentation](https://developer.spotify.com/documentation/soloist)
-- [OpenWrt Developer Guide](https://openwrt.org/docs/guide-developer/start)
-- [LuCI Development](https://github.com/openwrt/luci/wiki)
-
-## FAQ
-
-**Q: Does it support Spotify Free accounts?**  
-A: Yes, both Free and Premium accounts are supported.
-
-**Q: Can I use it on multiple OpenWrt devices?**  
-A: Yes, each device appears as a separate Spotify Connect device.
-
-**Q: What about audio latency?**  
-A: Latency depends on network and device performance, typically 1-2 seconds.
-
-**Q: Does it support lossless audio?**  
-A: Maximum supported bitrate is 320kbps (Ogg Vorbis).
-
----
-
-**Note**: Using Spotify Soloist requires compliance with Spotify's Terms of Service.
+MIT for the wrapper code here. The Soloist binary is Spotify's, proprietary, and
+governed by their terms; it is neither included nor redistributed by this
+repository.

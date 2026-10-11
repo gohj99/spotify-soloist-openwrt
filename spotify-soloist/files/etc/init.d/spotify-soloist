@@ -1,93 +1,283 @@
 #!/bin/sh /etc/rc.common
+#
+# spotify-soloist -- run the Spotify Soloist daemon under procd.
+#
+# Soloist has no configuration file of its own: every setting is a command line
+# flag, so this script is the entire configuration surface. The flags are
+# documented in docs/soloist-reference.md.
 
-START=95
-STOP=10
+START=96
+STOP=12
+
 USE_PROCD=1
-
 PROG=/usr/sbin/soloist
-CONF=spotify-soloist
+
+. /usr/lib/spotify-soloist/common.sh
+
+RUN_USER=""
+
+# --- audio plumbing --------------------------------------------------------
+#
+# Soloist only ever speaks to PipeWire or PulseAudio -- no Spotify build has
+# ALSA or JACK support -- so directing audio at a specific card, a USB DAC or a
+# 3.5 mm jack is a matter of configuring the sound server, not Soloist. See
+# docs/audio-output.md.
+
+setup_pulse_env() {
+	local cookie="" candidate sink
+
+	for candidate in /etc/pulse/cookie /var/run/pulse/.pulse-cookie; do
+		if [ -f "$candidate" ]; then
+			cookie="$candidate"
+			break
+		fi
+	done
+
+	# PULSE_SERVER carries the socket path in its URL "aux" field, where the
+	# slashes have to be percent-encoded.
+	procd_set_param env PULSE_SERVER=unix:/var/run/pulse/native
+	procd_set_param env XDG_RUNTIME_DIR=/var/run/pulse
+
+	if [ -n "$cookie" ]; then
+		# A system-mode PulseAudio writes the shared cookie as pulse:pulse
+		# 0600, which an unprivileged client in the pulse group still cannot
+		# read. Widen it to group-readable once, here, so the daemon does not
+		# have to run as root.
+		if [ -n "$RUN_USER" ] && [ "$(id -u)" = "0" ]; then
+			chgrp pulse "$cookie" 2>/dev/null
+			chmod 0640 "$cookie" 2>/dev/null
+		fi
+		[ -r "$cookie" ] && procd_set_param env PULSE_COOKIE="$cookie"
+	fi
+
+	# Output selection. The sound server owns the routing decision, so the
+	# configured ALSA card is translated into the sink name that PulseAudio (or
+	# PipeWire's pulse compatibility layer) uses for that same hardware.
+	# Only this daemon is pinned to it; nothing else on the router is affected.
+	[ -n "$ALSA_OUTPUT" ] && [ "$ALSA_OUTPUT" != "auto" ] || return 0
+
+	sink=$(/usr/bin/spotify-soloist-audio --resolve "$ALSA_OUTPUT" 2>/dev/null)
+	if [ -n "$sink" ]; then
+		procd_set_param env PULSE_SINK="$sink"
+		log_msg "routing audio to sink ${sink}" user.info
+	else
+		log_msg "could not resolve ${ALSA_OUTPUT} to a sink; using the default output" user.warn
+	fi
+}
+
+setup_pipewire_env() {
+	# PipeWire clients locate the socket through XDG_RUNTIME_DIR/pipewire-0, so
+	# that directory has to exist and be writable by whoever we run as.
+	local runtime="/var/run/spotify-soloist" sink
+
+	mkdir -p "$runtime"
+	chmod 0700 "$runtime"
+	[ -n "$RUN_USER" ] && chown "$RUN_USER" "$runtime" 2>/dev/null
+
+	procd_set_param env XDG_RUNTIME_DIR="$runtime"
+	procd_set_param env PIPEWIRE_RUNTIME_DIR="$runtime"
+
+	# With the PipeWire backend the device can also be named on the command
+	# line. If nothing was typed there, fall back to resolving the ALSA card so
+	# the same setting works for either backend.
+	if [ -z "$PW_DEVICE" ] && [ -n "$ALSA_OUTPUT" ] && [ "$ALSA_OUTPUT" != "auto" ]; then
+		sink=$(/usr/bin/spotify-soloist-audio --resolve "$ALSA_OUTPUT" 2>/dev/null)
+		[ -n "$sink" ] && PW_DEVICE="$sink"
+	fi
+}
+
+# --- service ---------------------------------------------------------------
 
 start_service() {
-	local enabled device_name ws_enabled ws_port cache_size bitrate normalize log_level
+	local enabled device_name backend pw_device initial_volume cache_size
+	local ws_enabled ws_address ws_port verbose
+	local data_dir cache_dir run_as_root require_pair api_key
+	local days rc
 
-	config_load "${CONF}"
+	config_load spotify-soloist
 	config_get_bool enabled main enabled 0
 
-	[ "$enabled" -eq 0 ] && {
-		echo "Spotify Soloist is disabled in config"
+	if [ "$enabled" != "1" ]; then
+		log_msg "disabled in /etc/config/spotify-soloist" user.notice
+		return 0
+	fi
+
+	if ! soloist_install_ready; then
+		log_msg "no binary at ${SOLOIST_BIN}: run /usr/bin/spotify-soloist-updater" user.err
 		return 1
-	}
+	fi
 
-	[ -x "$PROG" ] || {
-		echo "ERROR: Soloist binary not found at $PROG"
-		echo "Run: /usr/bin/spotify-soloist-updater"
+	# An expired build exits with status 10 the instant it starts. Refusing to
+	# launch it keeps procd from respawning a corpse every five seconds.
+	days=$(soloist_days_remaining)
+	if [ "$days" -le 0 ] 2>/dev/null; then
+		log_msg "build expired ${days#-} day(s) ago: run /usr/bin/spotify-soloist-updater" user.err
 		return 1
-	}
+	fi
 
-	config_get device_name main device_name "OpenWrt Spotify"
-	config_get_bool ws_enabled main ws_enabled 1
-	config_get ws_port main ws_port 8080
-	config_get cache_size main cache_size_limit 512
-	config_get bitrate main bitrate "default"
-	config_get_bool normalize main normalize_volume 0
-	config_get log_level main log_level "info"
+	if ! soloist_api_key_present; then
+		log_msg "no API key stored: add one on the Spotify Soloist page in LuCI" user.err
+		return 1
+	fi
+	api_key=$(sed -n '/[^[:space:]]/p' "${SOLOIST_API_KEY_FILE}" | head -n 1)
 
-	procd_open_instance
-	procd_set_param command "$PROG"
+	config_get device_name main device_name ""
+	[ -n "$device_name" ] || device_name="$(uname -n)"
+	[ -n "$device_name" ] || device_name="Spotify Soloist"
 
-	# Device name
-	procd_append_param command --device-name "$device_name"
+	config_get backend main audio_backend "auto"
+	config_get pw_device main pipewire_device ""
+	config_get alsa_output main alsa_output "auto"
+	config_get initial_volume main initial_volume "40"
+	config_get cache_size main cache_size "0"
+	config_get_bool ws_enabled main ws_enabled 0
+	config_get ws_address main ws_address "127.0.0.1"
+	config_get ws_port main ws_port "9090"
+	config_get_bool verbose main verbose 0
+	config_get_bool run_as_root main run_as_root 0
+	config_get_bool require_pair main require_pair 0
+	config_get data_dir main data_dir "${SOLOIST_DATA_DIR}"
+	config_get cache_dir main cache_dir "${SOLOIST_CACHE_DIR}"
 
-	# WebSocket API
-	[ "$ws_enabled" -eq 1 ] && {
-		procd_append_param command --ws "127.0.0.1:${ws_port}"
-	}
-
-	# Cache size (MB)
-	procd_append_param command --cache-size-limit "${cache_size}"
-
-	# Bitrate
-	[ "$bitrate" != "default" ] && {
-		procd_append_param command --bitrate "$bitrate"
-	}
-
-	# Volume normalization
-	[ "$normalize" -eq 1 ] && {
-		procd_append_param command --enable-volume-normalisation
-	}
-
-	# Log level
-	case "$log_level" in
-		trace|debug|info|warn|error)
-			procd_append_param command --log-level "$log_level"
+	# Resolve "auto" against what is actually installed.
+	case "$backend" in
+		pulseaudio|pipewire) ;;
+		*)
+			if [ -x /usr/bin/pipewire ] || [ -x /usr/bin/pipewire-pulse ]; then
+				backend=pipewire
+			elif [ -x /usr/bin/pulseaudio ]; then
+				backend=pulseaudio
+			else
+				log_msg "no audio server: install pulseaudio-daemon or pipewire" user.err
+				return 1
+			fi
 			;;
 	esac
 
-	# Respawn on crash: threshold(sec) timeout(sec) retry(count)
-	procd_set_param respawn 3600 5 0
+	# Drop privileges unless explicitly told not to. The soloist account is
+	# created by this package; fall back to root if it is missing.
+	if [ "$run_as_root" != "1" ] && id -u soloist >/dev/null 2>&1; then
+		RUN_USER=soloist
+	fi
 
-	# Log stdout/stderr to syslog
+	soloist_prepare_dirs
+	mkdir -p "$data_dir" "$cache_dir"
+	if [ -n "$RUN_USER" ]; then
+		[ "$data_dir" = "$SOLOIST_DATA_DIR" ] && chown -R "$RUN_USER" "$data_dir" 2>/dev/null
+		[ "$cache_dir" = "$SOLOIST_CACHE_DIR" ] && chown -R "$RUN_USER" "$SOLOIST_WORK_DIR" 2>/dev/null
+	fi
+
+	procd_open_instance
+
+	procd_set_param command "$PROG" \
+		--device-name "$device_name" \
+		--api-key "$api_key" \
+		--data-dir "$data_dir" \
+		--cache-dir "$cache_dir"
+
+	# Spotify rejects any cache size below 100 MB; 0 means unlimited.
+	case "$cache_size" in
+		''|0)
+			procd_append_param command --cache-size 0
+			;;
+		*)
+			if [ "$cache_size" -ge 100 ] 2>/dev/null; then
+				procd_append_param command --cache-size "$cache_size"
+			fi
+			;;
+	esac
+
+	# Spotify's build defaults the initial volume to 40.
+	case "$initial_volume" in
+		''|*[!0-9]*) ;;
+		*)
+			[ "$initial_volume" -le 100 ] &&
+				procd_append_param command --initial-volume "$initial_volume"
+			;;
+	esac
+
+	[ "$require_pair" = "1" ] && procd_append_param command --pair
+	[ "$verbose" = "1" ] && procd_append_param command --verbose
+
+	# The WebSocket API is opt-in. Port 0 lets the OS pick, and the chosen port
+	# is written to <data-dir>/ws.port.
+	if [ "$ws_enabled" = "1" ]; then
+		procd_append_param command --ws "${ws_address:-127.0.0.1}:${ws_port:-9090}"
+	fi
+
+	# The audio setup helpers below run after the command line has been built,
+	# because resolving a card to a sound-server sink can change the PipeWire
+	# device. Hand them what they need without adding more locals to pass.
+	PW_DEVICE="$pw_device"
+	ALSA_OUTPUT="$alsa_output"
+
+	case "$backend" in
+		pulseaudio) setup_pulse_env ;;
+		pipewire)   setup_pipewire_env ;;
+	esac
+
+	# setup_pipewire_env may have filled PW_DEVICE in from the ALSA card, and
+	# the flag has to precede the environment it was decided alongside.
+	if [ "$backend" = "pipewire" ] && [ -n "$PW_DEVICE" ]; then
+		procd_append_param command --pipewire-device "$PW_DEVICE"
+	fi
+
+	if [ -n "$RUN_USER" ]; then
+		# procd calls initgroups() against /etc/group, so membership of the
+		# supplementary "pulse" group is what actually grants access to the
+		# sound server's socket and cookie.
+		procd_set_param user "$RUN_USER"
+		procd_set_param group "$RUN_USER"
+	fi
+
+	procd_set_param respawn 3600 5 0
 	procd_set_param stdout 1
 	procd_set_param stderr 1
-
-	# Working directory
-	procd_set_param dir /tmp
-
-	# Reload triggers
-	procd_set_param file /etc/config/${CONF}
+	procd_set_param cwd /tmp
+	procd_set_param file /etc/config/spotify-soloist
 
 	procd_close_instance
+
+	soloist_write_meta
+
+	log_msg "started device=${device_name} backend=${backend} cache=${cache_dir} expires_in=${days}d" user.notice
+	return 0
 }
 
 stop_service() {
-	killall -q soloist
+	# The daemon leaves a lock file behind; a stale one makes the next start
+	# look like a second instance on the same data directory.
+	local data_dir
+	config_load spotify-soloist
+	config_get data_dir main data_dir "${SOLOIST_DATA_DIR}"
+	rm -f "${data_dir}/.lock" 2>/dev/null
+	return 0
 }
 
 service_triggers() {
-	procd_add_reload_trigger "${CONF}"
+	procd_add_reload_trigger spotify-soloist
 }
 
-reload_service() {
-	stop
-	start
+info_service() {
+	local data_dir ws_addr="" ws_port=""
+
+	if soloist_install_ready; then
+		printf '%-14s %s\n' "binary:" "$("$PROG" --version 2>/dev/null || echo present)"
+		printf '%-14s %s day(s)\n' "expires in:" "$(soloist_days_remaining)"
+	else
+		printf '%-14s %s\n' "binary:" "not installed"
+	fi
+
+	soloist_api_key_present || printf '%-14s %s\n' "api key:" "missing"
+
+	config_load spotify-soloist
+	config_get data_dir main data_dir "${SOLOIST_DATA_DIR}"
+
+	if [ -f "${data_dir}/ws.port" ]; then
+		ws_addr=$(cat "${data_dir}/ws.addr" 2>/dev/null)
+		ws_port=$(cat "${data_dir}/ws.port" 2>/dev/null)
+		printf '%-14s %s\n' "websocket:" "${ws_addr}:${ws_port}"
+	fi
 }
+
+extra_command "info" "Show installation, expiry and endpoint status"

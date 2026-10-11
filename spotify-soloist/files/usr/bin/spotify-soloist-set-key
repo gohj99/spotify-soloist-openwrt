@@ -1,0 +1,76 @@
+#!/bin/sh
+#
+# spotify-soloist-set-key -- store the Spotify Soloist API key.
+#
+# The key is a secret tied to the Spotify account that generated it, so it is
+# kept out of UCI (world readable) and out of process arguments (visible in ps
+# to anyone on the box). The key is read from a file and the file is removed.
+#
+# Usage: spotify-soloist-set-key <file-with-key>
+#        spotify-soloist-set-key --delete
+
+. /usr/lib/spotify-soloist/common.sh
+
+umask 077
+
+case "$1" in
+	--delete)
+		: > "${SOLOIST_API_KEY_FILE}"
+		chmod 0600 "${SOLOIST_API_KEY_FILE}"
+		log_msg "API key cleared" user.notice
+		exit 0
+		;;
+	--show-status)
+		# Never print the key itself.
+		if soloist_api_key_present; then
+			echo "present"
+		else
+			echo "missing"
+		fi
+		exit 0
+		;;
+	"")
+		echo "usage: spotify-soloist-set-key <file-with-key>|--delete" >&2
+		exit 1
+		;;
+esac
+
+[ -f "$1" ] || {
+	echo "spotify-soloist-set-key: no such file: $1" >&2
+	exit 1
+}
+
+key=$(sed -n '/[^[:space:]]/p' "$1" | head -n 1 | tr -d '\r')
+
+# The file is a staging file from the web UI; get rid of it whatever happens.
+rm -f "$1"
+
+if [ -z "$key" ]; then
+	echo "spotify-soloist-set-key: the supplied key is empty" >&2
+	exit 1
+fi
+
+# Spotify's dashboard issues opaque tokens. Reject anything that obviously is
+# not one, so a pasted error message or HTML page does not end up stored.
+case "$key" in
+	*[!A-Za-z0-9_.:+-]*)
+		echo "spotify-soloist-set-key: the key contains unexpected characters" >&2
+		exit 1
+		;;
+esac
+
+if [ "${#key}" -lt 16 ]; then
+	echo "spotify-soloist-set-key: the key looks too short" >&2
+	exit 1
+fi
+
+mkdir -p "$(dirname "${SOLOIST_API_KEY_FILE}")"
+printf '%s\n' "$key" > "${SOLOIST_API_KEY_FILE}" || {
+	echo "spotify-soloist-set-key: could not write ${SOLOIST_API_KEY_FILE}" >&2
+	exit 1
+}
+
+chmod 0600 "${SOLOIST_API_KEY_FILE}"
+log_msg "API key stored (${#key} characters)" user.notice
+
+exit 0

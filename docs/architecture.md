@@ -83,14 +83,19 @@
 **配置结构:**
 ```
 spotify-soloist
-  └── main
+  └── main                      # 唯一的配置节，类型为 spotify-soloist
       ├── enabled
       ├── device_name
-      ├── ws_enabled
-      ├── ws_port
-      ├── auto_update
-      ├── update_threshold
-      └── ...
+      ├── audio_backend         # auto | pulseaudio | pipewire
+      ├── alsa_output           # auto | hw:N | 声卡 id
+      ├── pipewire_device
+      ├── initial_volume
+      ├── data_dir
+      ├── cache_dir
+      ├── cache_size
+      ├── ws_enabled / ws_address / ws_port
+      ├── auto_update / update_threshold / check_update_cron
+      └── verbose / run_as_root
 ```
 
 ### 4. 自动更新系统
@@ -238,7 +243,7 @@ logread -f | grep soloist
 ```bash
 pidof soloist
 ps | grep soloist
-netstat -tuln | grep 8080
+netstat -tuln | grep 9090
 ```
 
 ---

@@ -1,13 +1,22 @@
 module("luci.controller.spotify-soloist", package.seeall)
 
+local fs = require "nixio.fs"
+local sys = require "luci.sys"
+local http = require "luci.http"
+local uci = require "luci.model.uci".cursor()
+
+local CONF = "spotify-soloist"
+
+local KEY_STAGING_PREFIX = "/tmp/spotify-soloist-key."
+local LOG_FILE = "/tmp/spotify-soloist/update.log"
+
 function index()
-	if not nixio.fs.access("/etc/config/spotify-soloist") then
+	if not fs.access("/etc/config/spotify-soloist") then
 		return
 	end
 
-	local page
-
-	page = entry({"admin", "services", "spotify-soloist"},
+	local page = entry(
+		{"admin", "services", "spotify-soloist"},
 		cbi("spotify-soloist"),
 		_("Spotify Soloist"), 60)
 	page.dependent = true
@@ -16,101 +25,178 @@ function index()
 	entry({"admin", "services", "spotify-soloist", "status"},
 		call("action_status")).leaf = true
 
-	entry({"admin", "services", "spotify-soloist", "update"},
-		call("action_update")).leaf = true
+	entry({"admin", "services", "spotify-soloist", "service"},
+		post("action_service")).leaf = true
 
-	entry({"admin", "services", "spotify-soloist", "check_days"},
-		call("action_check_days")).leaf = true
+	entry({"admin", "services", "spotify-soloist", "update"},
+		post("action_update")).leaf = true
+
+	entry({"admin", "services", "spotify-soloist", "log"},
+		call("action_log")).leaf = true
+
+	entry({"admin", "services", "spotify-soloist", "key"},
+		post("action_key")).leaf = true
 end
+
+-- Run a command and return its stdout, or nil plus the output on failure.
+local function run(cmd)
+	local out = sys.exec(cmd .. " 2>&1")
+	return out
+end
+
+local function json(payload)
+	http.prepare_content("application/json")
+	http.write_json(payload)
+end
+
+local function fail(message, code)
+	luci.http.status(code or 500, "Error")
+	json({ ok = false, error = message })
+end
+
+-- ---------------------------------------------------------------------------
+-- Status
+-- ---------------------------------------------------------------------------
 
 function action_status()
-	local sys = require "luci.sys"
-	local uci = require "luci.model.uci".cursor()
+	-- spotify-soloist-status already assembles everything in one pass; the
+	-- controller just relays it so there is a single place that knows how to
+	-- interrogate the daemon.
+	local out = run("/usr/bin/spotify-soloist-status")
 
-	local status = {
-		running = false,
-		enabled = false,
-		binary_exists = false,
-		days_remaining = -1,
-		version = "unknown",
-		device_name = "unknown",
-		ws_enabled = false,
-		ws_port = 8080
-	}
+	if not out or out == "" then
+		return fail("status script produced no output")
+	end
 
-	-- Check if binary exists
-	status.binary_exists = nixio.fs.access("/usr/sbin/soloist", "x")
-
-	-- Check if service is running
-	status.running = (sys.call("pidof soloist > /dev/null 2>&1") == 0)
-
-	-- Get UCI config
-	status.enabled = (uci:get("spotify-soloist", "main", "enabled") == "1")
-	status.device_name = uci:get("spotify-soloist", "main", "device_name") or "OpenWrt Spotify"
-	status.ws_enabled = (uci:get("spotify-soloist", "main", "ws_enabled") == "1")
-	status.ws_port = uci:get("spotify-soloist", "main", "ws_port") or "8080"
-
-	-- Get version if binary exists
-	if status.binary_exists then
-		local version_cmd = "/usr/sbin/soloist --version 2>&1"
-		local version_output = sys.exec(version_cmd)
-		if version_output and version_output ~= "" then
-			status.version = version_output:match("soloist ([%d%.]+)") or version_output:sub(1, 50)
+	local parsed = nil
+	if luci.jsonc then
+		local ok, res = pcall(luci.jsonc.parse, out)
+		if ok then
+			parsed = res
 		end
 	end
 
-	-- Get remaining days
-	status.days_remaining = get_remaining_days()
+	if not parsed then
+		return fail("could not parse the status output")
+	end
 
-	luci.http.prepare_content("application/json")
-	luci.http.write_json(status)
+	-- The update log gets appended to a status response so the UI can show the
+	-- tail without a second round trip.
+	parsed.log = ""
+	if fs.access(LOG_FILE) then
+		parsed.log = sys.exec("tail -n 40 " .. LOG_FILE .. " 2>/dev/null") or ""
+	end
+
+	local updating = fs.access("/var/lock/spotify-soloist-update.lock")
+	parsed.updating = updating and true or false
+
+	json(parsed)
 end
+
+-- ---------------------------------------------------------------------------
+-- Service control
+-- ---------------------------------------------------------------------------
+
+function action_service()
+	local action = http.formvalue("action")
+
+	if action ~= "start" and action ~= "stop" and
+	   action ~= "restart" and action ~= "enable" and
+	   action ~= "disable" then
+		return fail("unknown action", 400)
+	end
+
+	-- Surface the reason a start fails instead of just the exit status.
+	local out = run("/etc/init.d/spotify-soloist " .. action)
+	local status = sys.call("/etc/init.d/spotify-soloist running >/dev/null 2>&1")
+
+	json({
+		ok = (out ~= nil),
+		action = action,
+		running = (status == 0),
+		output = out or ""
+	})
+end
+
+-- ---------------------------------------------------------------------------
+-- Update
+-- ---------------------------------------------------------------------------
 
 function action_update()
-	local sys = require "luci.sys"
+	local force = http.formvalue("force") == "1"
 
-	luci.http.prepare_content("application/json")
-
-	local result = sys.call("/usr/bin/spotify-soloist-updater > /tmp/soloist-update.log 2>&1")
-
-	local log = ""
-	local log_file = io.open("/tmp/soloist-update.log", "r")
-	if log_file then
-		log = log_file:read("*all")
-		log_file:close()
+	-- Downloading tens of megabytes does not fit inside an HTTP request, so the
+	-- updater is detached and the browser polls /status until it finishes. The
+	-- updater arms its own rollback guard in case we are interrupted.
+	local cmd = "/usr/bin/spotify-soloist-updater"
+	if force then
+		cmd = cmd .. " --force"
 	end
 
-	luci.http.write_json({
-		success = (result == 0),
-		message = (result == 0) and "Update completed successfully" or "Update failed",
-		log = log
+	fs.mkdirr("/tmp/spotify-soloist")
+	sys.call(": > " .. LOG_FILE)
+	sys.call(cmd .. " >> " .. LOG_FILE .. " 2>&1 &")
+
+	json({
+		ok = true,
+		started = true,
+		force = force,
+		message = "Update started. This page will refresh when it finishes."
 	})
 end
 
-function action_check_days()
-	luci.http.prepare_content("application/json")
-	luci.http.write_json({
-		days_remaining = get_remaining_days()
-	})
-end
-
-function get_remaining_days()
-	local sys = require "luci.sys"
-
-	-- Try to get remaining days from check script
-	local days_output = sys.exec("/usr/bin/spotify-soloist-check --days 2>/dev/null")
-	local days = tonumber(days_output)
-
-	if not days or days < 0 then
-		-- Fallback: try to parse from logs
-		local log_cmd = "logread | grep -i soloist | grep -iE '(expire|remaining|days left)' | tail -n 1"
-		local log_output = sys.exec(log_cmd)
-
-		if log_output and log_output ~= "" then
-			-- Try to extract number before "days"
-			days = tonumber(log_output:match("(%d+)%s+days?"))
-		end
+function action_log()
+	local out = ""
+	if fs.access(LOG_FILE) then
+		out = sys.exec("tail -n 200 " .. LOG_FILE .. " 2>/dev/null") or ""
 	end
 
-	return days or -1
+	http.prepare_content("text/plain; charset=utf-8")
+	http.write(out)
+end
+
+-- ---------------------------------------------------------------------------
+-- API key
+-- ---------------------------------------------------------------------------
+
+function action_key()
+	local action = http.formvalue("action")
+
+	if action == "delete" then
+		local out = run("/usr/bin/spotify-soloist-set-key --delete")
+		return json({ ok = true, output = out or "" })
+	end
+
+	local key = http.formvalue("api_key") or ""
+	key = key:gsub("^%s+", ""):gsub("%s+$", "")
+
+	if key == "" then
+		return fail("paste the API key first", 400)
+	end
+
+	-- Stage under /tmp with owner-only permissions, then hand the file to the
+	-- setter, which validates it and installs it with mode 0600. The key never
+	-- travels through a shell argument, where it would show up in ps.
+	local path = KEY_STAGING_PREFIX .. tostring(os.time()) .. "." ..
+		tostring(math.random(100000, 999999))
+
+	local fh = io.open(path, "w")
+	if not fh then
+		return fail("could not stage the key in /tmp")
+	end
+	fh:write(key .. "\n")
+	fh:close()
+	fs.chmod(path, 384) -- 0600
+
+	local out = run("/usr/bin/spotify-soloist-set-key " .. path)
+	fs.unlink(path)
+
+	local present = (sys.call("/usr/bin/spotify-soloist-set-key --show-status 2>/dev/null | grep -q present") == 0)
+
+	json({
+		ok = present,
+		stored = present,
+		output = out or "",
+		error = present and nil or "the key was rejected, see the output"
+	})
 end

@@ -1,176 +1,367 @@
 #!/bin/sh
-# Spotify Soloist Binary Updater
-# Handles 90-day expiration by downloading latest binary
+#
+# spotify-soloist-updater -- download and install the Spotify Soloist build.
+#
+# Spotify only ships "latest" archives under stable names and requires that end
+# users fetch them from their own page, so this script is the only supported way
+# to keep the binary fresh on a router. It is careful about one thing in
+# particular: the published builds are glibc binaries, so on a musl OpenWrt
+# target they cannot run at all. We verify by executing the candidate before
+# touching the installed copy.
 
-set -e
+. /usr/lib/spotify-soloist/common.sh
 
-INSTALL_PATH="/usr/sbin/soloist"
-BACKUP_PATH="/usr/sbin/soloist.backup"
-TEMP_DIR="/tmp/soloist-update"
-BASE_URL="https://developer.spotify.com/soloist/download"
-LOG_TAG="spotify-soloist-updater"
+STAGING_DIR="/tmp/spotify-soloist/staging"
+STAGING_ARCHIVE="${STAGING_DIR}/soloist_release.tar.gz"
+STAGING_EXTRACT="${STAGING_DIR}/extract"
+BACKUP_BIN="/tmp/spotify-soloist/soloist.previous"
+DEADMAN_PID="/tmp/spotify-soloist/deadman.pid"
 
-# Architecture detection
-detect_arch() {
-	local machine=$(uname -m)
-	case "$machine" in
-		aarch64|arm64)
-			echo "aarch64"
-			;;
-		armv7l|armv7)
-			echo "armv7"
-			;;
-		x86_64|amd64)
-			echo "x86_64"
-			;;
-		*)
-			logger -t "$LOG_TAG" -p user.err "Unsupported architecture: $machine"
-			echo "unknown"
-			return 1
-			;;
+# How long to wait for the new build to come up before rolling back.
+DEADMAN_TIMEOUT=90
+
+usage() {
+	cat <<'EOF'
+Usage: spotify-soloist-updater [options]
+
+  (no option)        Download the current build and install it if valid.
+  --force            Install even if the installed build is not near expiry.
+  --check            Print status only; exit 0 if the build is healthy.
+  --deadman          Internal: scheduled rollback guard.
+  --help             This message.
+EOF
+}
+
+die() {
+	log_msg "ERROR: $1" user.err
+	exit "${2:-1}"
+}
+
+# --- candidate verification ------------------------------------------------
+
+# Returns 0 if the file looks like an ELF for the running architecture.
+verify_elf_arch() {
+	local file="$1" machine expect
+
+	machine=$(od -An -tx1 -j18 -N2 "${file}" 2>/dev/null | tr -d ' \n')
+	[ -n "$machine" ] || return 1
+
+	# e_machine, little endian: 0xb7 = aarch64, 0x28 = arm, 0x3e = x86-64
+	case "$(uname -m)" in
+		aarch64|arm64) expect="b700" ;;
+		armv7l|armv6l|armv7|arm) expect="2800" ;;
+		x86_64|amd64) expect="3e00" ;;
+		*) return 1 ;;
 	esac
+
+	[ "$machine" = "$expect" ]
 }
 
-# Get download URL for architecture
-get_download_url() {
-	local arch="$1"
-	case "$arch" in
-		aarch64)
-			echo "${BASE_URL}/latest/linux-aarch64/soloist.tar.gz"
-			;;
-		armv7)
-			echo "${BASE_URL}/latest/linux-armv7/soloist.tar.gz"
-			;;
-		x86_64)
-			echo "${BASE_URL}/latest/linux-x86_64/soloist.tar.gz"
-			;;
-		*)
-			return 1
-			;;
+# Run the candidate binary. This is the real gate: it catches wrong
+# architecture, missing glibc/libatomic/libgcc_s and internal inconsistencies.
+verify_runnable() {
+	local file="$1" out
+
+	out=$("${file}" --version 2>&1)
+	if [ $? -ne 0 ]; then
+		log_msg "candidate is not runnable here: ${out}" user.err
+		return 1
+	fi
+
+	case "$out" in
+		soloist\ *) ;;
+		*) return 1 ;;
 	esac
-}
 
-# Download and extract binary
-download_binary() {
-	local url="$1"
-	local temp_archive="${TEMP_DIR}/soloist.tar.gz"
-
-	logger -t "$LOG_TAG" "Downloading from: $url"
-
-	# Create temp directory
-	rm -rf "$TEMP_DIR"
-	mkdir -p "$TEMP_DIR"
-
-	# Download with curl
-	if ! curl -L -f -o "$temp_archive" "$url" --connect-timeout 30 --max-time 300; then
-		logger -t "$LOG_TAG" -p user.err "Download failed"
-		rm -rf "$TEMP_DIR"
-		return 1
-	fi
-
-	# Extract tarball
-	if ! tar -xzf "$temp_archive" -C "$TEMP_DIR"; then
-		logger -t "$LOG_TAG" -p user.err "Extraction failed"
-		rm -rf "$TEMP_DIR"
-		return 1
-	fi
-
-	# Find soloist binary in extracted files
-	local binary_path
-	binary_path=$(find "$TEMP_DIR" -type f -name "soloist" -executable | head -n 1)
-
-	if [ -z "$binary_path" ]; then
-		logger -t "$LOG_TAG" -p user.err "Binary not found in archive"
-		rm -rf "$TEMP_DIR"
-		return 1
-	fi
-
-	echo "$binary_path"
-}
-
-# Install binary
-install_binary() {
-	local source="$1"
-	local service_was_running=0
-
-	# Check if service is running
-	if /etc/init.d/spotify-soloist running >/dev/null 2>&1; then
-		service_was_running=1
-		logger -t "$LOG_TAG" "Stopping service for update"
-		/etc/init.d/spotify-soloist stop
-		sleep 2
-	fi
-
-	# Backup existing binary
-	if [ -f "$INSTALL_PATH" ]; then
-		cp "$INSTALL_PATH" "$BACKUP_PATH"
-		logger -t "$LOG_TAG" "Backed up existing binary"
-	fi
-
-	# Install new binary
-	cp "$source" "$INSTALL_PATH"
-	chmod +x "$INSTALL_PATH"
-
-	# Verify installation
-	if ! "$INSTALL_PATH" --version >/dev/null 2>&1; then
-		logger -t "$LOG_TAG" -p user.err "New binary validation failed, restoring backup"
-		if [ -f "$BACKUP_PATH" ]; then
-			mv "$BACKUP_PATH" "$INSTALL_PATH"
+	# A build that is already expired is not worth installing.
+	local epoch days
+	epoch=$(echo "$out" | sed -n 's/.* build \([0-9][0-9]*\) .*/\1/p')
+	if [ -n "$epoch" ]; then
+		days=$(soloist_days_remaining_for_epoch "$epoch")
+		if [ "$days" -le 0 ]; then
+			log_msg "downloaded build is already expired (${days} days)" user.err
+			return 1
 		fi
+	fi
+
+	echo "$out"
+	return 0
+}
+
+# Same arithmetic as soloist_days_remaining() but for an explicit epoch.
+soloist_days_remaining_for_epoch() {
+	local build="$1" now
+	now=$(date +%s 2>/dev/null) || {
+		echo "-1"
+		return 1
+	}
+	echo $(( (build + SOLOIST_BUILD_TTL_DAYS * 86400 - now) / 86400 ))
+}
+
+# Optional pinning: one "<archive-name> <sha256>" per line in /etc/spotify-soloist/sha256.
+verify_pinned_hash() {
+	local archive="$1"
+	[ -s "${SOLOIST_SHA256_FILE}" ] || return 0
+
+	local want
+	want=$(sed -n "s/^${archive}[[:space:]]\{1,\}\([0-9a-fA-F]\{64\}\).*/\1/p" \
+		"${SOLOIST_SHA256_FILE}" | head -n 1)
+	[ -n "$want" ] || return 0
+
+	local got
+	got=$(sha256sum "${archive}" 2>/dev/null | cut -d' ' -f1)
+	if [ "${got}" != "${want}" ]; then
+		log_msg "sha256 mismatch for ${archive} (expected ${want}, got ${got})" user.err
 		return 1
 	fi
 
-	logger -t "$LOG_TAG" "Binary installed successfully"
+	log_msg "sha256 matches the pinned value for ${archive}"
+	return 0
+}
 
-	# Restart service if it was running
-	if [ $service_was_running -eq 1 ]; then
-		logger -t "$LOG_TAG" "Restarting service"
-		/etc/init.d/spotify-soloist start
+# --- installation ---------------------------------------------------------
+
+stop_daemon() {
+	/etc/init.d/spotify-soloist stop >/dev/null 2>&1
+	sleep 1
+
+	# The daemon should be gone; make sure.
+	local i=0
+	while [ $i -lt 10 ]; do
+		pgrep -f "${SOLOIST_BIN}" >/dev/null 2>&1 || return 0
+		sleep 1
+		i=$((i + 1))
+	done
+
+	pkill -f "${SOLOIST_BIN}" 2>/dev/null
+	sleep 1
+	return 0
+}
+
+start_daemon() {
+	/etc/init.d/spotify-soloist start >/dev/null 2>&1
+}
+
+daemon_healthy() {
+	# Two conditions: the process is up, and it did not immediately exit 10.
+	/etc/init.d/spotify-soloist running >/dev/null 2>&1 || return 1
+
+	# A build that expired between download and start would exit 10 at once.
+	sleep 3
+	/etc/init.d/spotify-soloist running >/dev/null 2>&1
+}
+
+install_candidate() {
+	local candidate="$1"
+	local was_running=0
+
+	/etc/init.d/spotify-soloist running >/dev/null 2>&1 && was_running=1
+
+	stop_daemon
+
+	if [ -f "${SOLOIST_BIN}" ]; then
+		cp "${SOLOIST_BIN}" "${BACKUP_BIN}" || log_msg "WARN: could not back up current binary" user.warn
 	fi
 
-	# Cleanup
-	rm -f "$BACKUP_PATH"
-	rm -rf "$TEMP_DIR"
+	# Install to a temporary name in the same directory, then rename, so a
+	# crash mid-copy can never leave a truncated /usr/sbin/soloist behind.
+	local tmp="${SOLOIST_BIN}.new"
+	cp "${candidate}" "${tmp}" || {
+		log_msg "ERROR: copy to ${tmp} failed" user.err
+		[ "$was_running" = 1 ] && start_daemon
+		return 1
+	}
+	chmod 0755 "${tmp}"
+	mv "${tmp}" "${SOLOIST_BIN}" || {
+		log_msg "ERROR: rename into place failed" user.err
+		[ "$was_running" = 1 ] && start_daemon
+		return 1
+	}
+
+	soloist_write_meta
+
+	if [ "$was_running" = 1 ]; then
+		start_daemon
+		if daemon_healthy; then
+			log_msg "new build started successfully"
+			return 0
+		fi
+
+		log_msg "new build did not stay up, rolling back" user.err
+		rollback
+		return 1
+	fi
 
 	return 0
 }
 
-# Main update logic
-main() {
-	logger -t "$LOG_TAG" "Starting update check"
+rollback() {
+	stop_daemon
 
-	# Detect architecture
-	local arch
-	arch=$(detect_arch) || {
-		echo "ERROR: Unsupported architecture"
-		exit 1
-	}
-
-	logger -t "$LOG_TAG" "Detected architecture: $arch"
-
-	# Get download URL
-	local url
-	url=$(get_download_url "$arch") || {
-		echo "ERROR: Could not determine download URL"
-		exit 1
-	}
-
-	# Download binary
-	local binary_path
-	binary_path=$(download_binary "$url") || {
-		echo "ERROR: Download failed"
-		exit 1
-	}
-
-	# Install binary
-	if install_binary "$binary_path"; then
-		echo "SUCCESS: Spotify Soloist updated successfully"
-		logger -t "$LOG_TAG" "Update completed successfully"
-		exit 0
-	else
-		echo "ERROR: Installation failed"
-		exit 1
+	if [ -f "${BACKUP_BIN}" ]; then
+		cp "${BACKUP_BIN}" "${SOLOIST_BIN}"
+		chmod 0755 "${SOLOIST_BIN}"
+		log_msg "restored the previous build"
+		soloist_write_meta
 	fi
+
+	# Keep the service configured; it will retry and log the expiration.
+	start_daemon
+	return 0
 }
 
-main "$@"
+# --- deadman --------------------------------------------------------------
+#
+# A download over a slow link can outlive the LuCI HTTP request that started
+# it, leaving the Web UI without a result. The caller schedules a guard: if the
+# updater finishes normally the guard is cancelled, otherwise the guard rolls
+# the installation back after DEADMAN_TIMEOUT seconds.
+
+schedule_deadman() {
+	# Leave a boot-independent record for the operator.
+	soloist_write_meta
+	date +%s > /tmp/spotify-soloist/update.started
+
+	(
+		trap '' TERM INT HUP
+		sleep ${DEADMAN_TIMEOUT}
+		# Reached only when nobody cancelled us.
+		log_msg "update guard fired after ${DEADMAN_TIMEOUT}s, rolling back" user.warn
+		rollback
+	) &
+	echo $! > "${DEADMAN_PID}"
+}
+
+cancel_deadman() {
+	[ -f "${DEADMAN_PID}" ] || return 0
+	local pid
+	pid=$(cat "${DEADMAN_PID}" 2>/dev/null)
+	[ -n "${pid}" ] && kill "${pid}" 2>/dev/null
+	rm -f "${DEADMAN_PID}"
+	return 0
+}
+
+# --- main -----------------------------------------------------------------
+
+do_update() {
+	local force="$1"
+
+	soloist_api_key_present || log_msg "WARN: no API key stored yet; the daemon cannot log in" user.warn
+
+	soloist_take_lock || die "another update is already running" 2
+
+	local url
+	url=$(soloist_archive_url) || die "unsupported architecture: $(uname -m)"
+
+	local archive
+	archive=$(basename "${url}")
+
+	log_msg "downloading ${url}"
+
+	rm -rf "${STAGING_DIR}"
+	mkdir -p "${STAGING_EXTRACT}"
+
+	if ! curl -fLsS --connect-timeout 20 --max-time 600 \
+		-o "${STAGING_ARCHIVE}" "${url}"; then
+		die "download failed (check DNS, WAN connectivity and clock)"
+	fi
+
+	local size
+	size=$(wc -c < "${STAGING_ARCHIVE}" 2>/dev/null || echo 0)
+	if [ "${size}" -lt 1000000 ]; then
+		die "downloaded archive is implausibly small (${size} bytes)"
+	fi
+
+	verify_pinned_hash "${archive}" || die "archive failed hash verification"
+
+	if ! tar -xzf "${STAGING_ARCHIVE}" -C "${STAGING_EXTRACT}" soloist 2>/dev/null; then
+		# Older archives carry extra files; extract everything then look.
+		tar -xzf "${STAGING_ARCHIVE}" -C "${STAGING_EXTRACT}" 2>/dev/null ||
+			die "could not extract the archive"
+	fi
+
+	if [ ! -f "${STAGING_EXTRACT}/soloist" ]; then
+		die "archive does not contain a soloist executable"
+	fi
+
+	chmod 0755 "${STAGING_EXTRACT}/soloist"
+
+	verify_elf_arch "${STAGING_EXTRACT}/soloist" ||
+		die "archive is not built for $(uname -m)"
+
+	local newver
+	newver=$(verify_runnable "${STAGING_EXTRACT}/soloist") || die \
+		"the downloaded build cannot run on this device; Spotify Soloist requires a glibc-based (not musl) system with libatomic and libgcc"
+
+	log_msg "candidate verified: ${newver}"
+
+	install_candidate "${STAGING_EXTRACT}/soloist" ||
+		die "installation rolled back, the previous build is still in place"
+
+	soloist_prepare_dirs
+	soloist_write_meta
+
+	rm -rf "${STAGING_DIR}"
+
+	log_msg "update complete: ${newver}"
+	return 0
+}
+
+check_only() {
+	soloist_install_ready || die "soloist is not installed" 3
+
+	local days
+	days=$(soloist_days_remaining)
+	soloist_write_meta
+
+	log_msg "installed build: $(soloist_meta_get version)"
+	log_msg "days remaining: ${days}"
+
+	[ "$days" -gt 0 ] 2>/dev/null || return 3
+	return 0
+}
+
+# --- entry ----------------------------------------------------------------
+
+[ -r /usr/lib/spotify-soloist/common.sh ] || {
+	echo "spotify-soloist: missing /usr/lib/spotify-soloist/common.sh" >&2
+	exit 1
+}
+
+ACTION_UPDATE=1
+FORCE=0
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--force)
+			FORCE=1
+			;;
+		--check)
+			ACTION_UPDATE=0
+			;;
+		--deadman)
+			schedule_deadman
+			exit 0
+			;;
+		-h|--help)
+			usage
+			exit 0
+			;;
+		*)
+			usage >&2
+			exit 1
+			;;
+	esac
+	shift
+done
+
+if [ "$ACTION_UPDATE" = 0 ]; then
+	check_only
+	exit $?
+fi
+
+do_update "$FORCE"
+rc=$?
+
+cancel_deadman
+exit $rc

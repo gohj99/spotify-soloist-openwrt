@@ -65,7 +65,7 @@
 4. **测试你的更改**
    ```bash
    # 在实际设备上测试
-   ./test.sh
+   ./.dev/selftest.sh   # on the router, after installing
    ```
 
 5. **提交更改**
@@ -283,7 +283,7 @@ logread | grep soloist
 /usr/bin/spotify-soloist-check --days
 
 # 强制更新
-/usr/bin/spotify-soloist-check --force
+/usr/bin/spotify-soloist-updater --force
 ```
 
 #### 测试 LuCI 界面

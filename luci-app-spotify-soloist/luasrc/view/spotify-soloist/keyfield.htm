@@ -1,0 +1,124 @@
+<%+cbi/valueheader%>
+
+<%
+	local fs = require "nixio.fs"
+	local present = fs.access("/etc/spotify-soloist/api-key")
+		and (require("luci.sys").exec("test -s /etc/spotify-soloist/api-key && echo yes") or "")
+	local has_key = present and present:match("yes")
+%>
+
+<div class="soloist-key">
+	<% if has_key then %>
+		<p class="soloist-key-state ok">
+			<%:An API key is stored.%>
+			<span class="soloist-key-note">
+				<%:It is never displayed here again. Paste a new one below to replace it.%>
+			</span>
+		</p>
+	<% else %>
+		<p class="soloist-key-state warn">
+			<%:No API key is stored yet. The service will not start until one is saved.%>
+		</p>
+	<% end %>
+
+	<div class="soloist-key-row">
+		<input type="password" id="soloist-key-input" class="cbi-input-password"
+			autocomplete="off" spellcheck="false"
+			placeholder="<%:Paste the Soloist API key here%>" />
+		<button class="btn cbi-button cbi-button-apply" id="soloist-key-save"><%:Save key%></button>
+		<% if has_key then %>
+			<button class="btn cbi-button cbi-button-reset" id="soloist-key-clear"><%:Remove key%></button>
+		<% end %>
+	</div>
+
+	<p class="soloist-key-help">
+		<%:Create the key at developer.spotify.com/dashboard/soloist. Only a Spotify Premium account can generate one. The key is tied to that account and should be treated as a password.%>
+	</p>
+
+	<div id="soloist-key-message" class="soloist-message" style="display:none"></div>
+</div>
+
+<style>
+	.soloist-key { padding: .75rem; background: rgba(127,127,127,.08); border-radius: 6px; }
+	.soloist-key-state { margin: 0 0 .6rem; font-weight: 600; }
+	.soloist-key-state.ok { color: #0b7a3b; }
+	.soloist-key-state.warn { color: #a15c00; }
+	.soloist-key-note { font-weight: 400; opacity: .7; }
+	.soloist-key-row { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; }
+	.soloist-key-row input { flex: 1 1 22rem; min-width: 14rem; }
+	.soloist-key-help { margin: .6rem 0 0; font-size: .85rem; opacity: .75; }
+</style>
+
+<script type="text/javascript">
+(function () {
+	var url_key = '<%=url("admin/services/spotify-soloist/key")%>';
+	var token = '<%=luci.dispatcher.context.authtoken or ""%>';
+
+	function say(text, kind) {
+		var box = document.getElementById('soloist-key-message');
+		box.style.display = 'block';
+		box.className = 'soloist-message ' + (kind || 'info');
+		box.textContent = text;
+	}
+
+	function send(payload, done) {
+		var body = [];
+		for (var k in payload) {
+			body.push(encodeURIComponent(k) + '=' + encodeURIComponent(payload[k]));
+		}
+		body.push('token=' + encodeURIComponent(token));
+
+		var xhr = new XMLHttpRequest();
+		xhr.open('POST', url_key, true);
+		xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+		xhr.onreadystatechange = function () {
+			if (xhr.readyState !== 4) return;
+			var res = null;
+			try { res = JSON.parse(xhr.responseText); } catch (e) {}
+			done(res, xhr.status);
+		};
+		xhr.send(body.join('&'));
+	}
+
+	var input = document.getElementById('soloist-key-input');
+
+	document.getElementById('soloist-key-save').onclick = function () {
+		var value = input.value.replace(/^\s+|\s+$/g, '');
+		if (!value) {
+			say('<%:Paste the key first.%>', 'err');
+			return;
+		}
+
+		say('<%:Saving...%>', 'info');
+		send({ api_key: value }, function (res) {
+			// Clear the field either way; there is no reason to keep the secret
+			// sitting in the DOM.
+			input.value = '';
+			if (res && res.ok) {
+				say('<%:Key saved. Reloading...%>', 'ok');
+				window.setTimeout(function () { location.reload(); }, 1200);
+			} else {
+				say((res && (res.error || res.output)) || '<%:the request failed%>', 'err');
+			}
+		});
+	};
+
+	var clear = document.getElementById('soloist-key-clear');
+	if (clear) {
+		clear.onclick = function () {
+			if (!confirm('<%:Remove the stored API key? The service will stop being able to log in.%>'))
+				return;
+			send({ action: 'delete' }, function (res) {
+				if (res && res.ok) {
+					say('<%:Key removed. Reloading...%>', 'ok');
+					window.setTimeout(function () { location.reload(); }, 1200);
+				} else {
+					say((res && res.error) || '<%:the request failed%>', 'err');
+				}
+			});
+		};
+	}
+})();
+</script>
+
+<%+cbi/valuefooter%>

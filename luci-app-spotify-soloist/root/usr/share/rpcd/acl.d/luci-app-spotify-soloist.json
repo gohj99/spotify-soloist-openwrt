@@ -1,17 +1,23 @@
 {
 	"luci-app-spotify-soloist": {
-		"description": "Grant access to Spotify Soloist configuration",
+		"description": "Grant access to the Spotify Soloist configuration",
 		"read": {
 			"uci": [ "spotify-soloist" ],
+			"ubus": {
+				"service": [ "list" ]
+			},
 			"file": {
-				"/usr/bin/spotify-soloist-check": [ "exec" ],
-				"/usr/bin/spotify-soloist-updater": [ "exec" ]
+				"/usr/bin/spotify-soloist-status": [ "exec" ],
+				"/tmp/spotify-soloist/update.log": [ "read" ]
 			}
 		},
 		"write": {
 			"uci": [ "spotify-soloist" ],
 			"file": {
-				"/usr/bin/spotify-soloist-updater": [ "exec" ]
+				"/usr/bin/spotify-soloist-updater": [ "exec" ],
+				"/usr/bin/spotify-soloist-set-key": [ "exec" ],
+				"/etc/init.d/spotify-soloist": [ "exec" ],
+				"/tmp/spotify-soloist-key.*": [ "write" ]
 			}
 		}
 	}

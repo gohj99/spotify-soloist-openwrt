@@ -1,0 +1,23 @@
+# Optional pinned archive hashes for /usr/bin/spotify-soloist-updater.
+#
+# Spotify publishes no checksums or signatures for the Soloist archives, and the
+# download URL always serves whatever build is current, so the only way to get a
+# repeatable install is to pin the hash of an archive you have vetted yourself.
+#
+# Format, one entry per line:
+#
+#   <archive-name>  <sha256>
+#
+# Archive names, by mechanism (the spelling used in the URL):
+#   arm64    aarch64, 64-bit ARM
+#   arm32    armv7l / armv6l
+#   x86_64   x86-64
+#
+# Example -- note that pinning a build also pins its expiry date, so a pinned
+# entry stops being installable once that build passes 90 days:
+#
+#   x86_64  0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+#
+# While every line stays commented out, the updater instead verifies the
+# candidate by executing it before installation, which catches a wrong
+# architecture and a missing shared library, but not a substituted payload.

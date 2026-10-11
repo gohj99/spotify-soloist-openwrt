@@ -1,169 +1,237 @@
 <%+cbi/valueheader%>
 
-<div class="cbi-value-field" style="padding: 10px; background: var(--surface-1, #0F131C); border-radius: 8px;">
-	<div id="soloist-status" style="display: grid; gap: 12px;">
-		<div style="display: flex; align-items: center; gap: 8px;">
-			<span style="font-weight: 600;">Status:</span>
-			<span id="status-badge" style="padding: 4px 12px; border-radius: 999px; font-size: 0.875rem; font-weight: 500;">
-				Loading...
-			</span>
-		</div>
-
-		<div id="details-grid" style="display: grid; gap: 8px; font-size: 0.9rem;">
-			<div style="display: flex; justify-content: space-between;">
-				<span style="color: var(--text-secondary, #94A3B8);">Binary Status:</span>
-				<span id="binary-status">-</span>
-			</div>
-			<div style="display: flex; justify-content: space-between;">
-				<span style="color: var(--text-secondary, #94A3B8);">Device Name:</span>
-				<span id="device-name">-</span>
-			</div>
-			<div style="display: flex; justify-content: space-between;">
-				<span style="color: var(--text-secondary, #94A3B8);">WebSocket API:</span>
-				<span id="ws-status">-</span>
-			</div>
-			<div style="display: flex; justify-content: space-between;">
-				<span style="color: var(--text-secondary, #94A3B8);">Days Until Expiration:</span>
-				<span id="days-remaining" style="font-weight: 600;">-</span>
-			</div>
-			<div style="display: flex; justify-content: space-between;">
-				<span style="color: var(--text-secondary, #94A3B8);">Version:</span>
-				<span id="version" style="font-family: monospace; font-size: 0.85rem;">-</span>
-			</div>
-		</div>
-
-		<div style="display: flex; gap: 8px; margin-top: 8px;">
-			<button id="btn-refresh" class="cbi-button" style="padding: 6px 16px; border-radius: 6px;">
-				Refresh Status
-			</button>
-			<button id="btn-update" class="cbi-button cbi-button-apply" style="padding: 6px 16px; border-radius: 6px;">
-				Update Now
-			</button>
-		</div>
-
-		<div id="update-message" style="display: none; margin-top: 8px; padding: 8px 12px; border-radius: 6px; font-size: 0.9rem;"></div>
+<div class="soloist-status">
+	<div class="soloist-status-row">
+		<span class="soloist-label"><%:Service%></span>
+		<span class="soloist-badge" id="soloist-badge">...</span>
 	</div>
+
+	<div class="soloist-grid">
+		<div><span><%:Binary%></span><em id="soloist-binary">-</em></div>
+		<div><span><%:Expires in%></span><em id="soloist-expiry">-</em></div>
+		<div><span><%:Version%></span><em id="soloist-version" class="mono">-</em></div>
+		<div><span><%:Device name%></span><em id="soloist-device">-</em></div>
+		<div><span><%:Sound server%></span><em id="soloist-backend">-</em></div>
+		<div><span><%:Spotify login%></span><em id="soloist-login">-</em></div>
+		<div><span><%:Remote control API%></span><em id="soloist-ws">-</em></div>
+		<div><span><%:Architecture%></span><em id="soloist-arch" class="mono">-</em></div>
+	</div>
+
+	<div class="soloist-actions">
+		<button class="btn cbi-button" id="soloist-btn-start"><%:Start%></button>
+		<button class="btn cbi-button" id="soloist-btn-stop"><%:Stop%></button>
+		<button class="btn cbi-button" id="soloist-btn-restart"><%:Restart%></button>
+		<button class="btn cbi-button cbi-button-apply" id="soloist-btn-update"><%:Update build%></button>
+		<button class="btn cbi-button" id="soloist-btn-log"><%:Show update log%></button>
+	</div>
+
+	<div id="soloist-message" class="soloist-message" style="display:none"></div>
+
+	<pre id="soloist-log" class="soloist-log" style="display:none"></pre>
 </div>
 
-<script>
-(function() {
-	var statusBadge = document.getElementById('status-badge');
-	var binaryStatus = document.getElementById('binary-status');
-	var deviceName = document.getElementById('device-name');
-	var wsStatus = document.getElementById('ws-status');
-	var daysRemaining = document.getElementById('days-remaining');
-	var version = document.getElementById('version');
-	var updateMessage = document.getElementById('update-message');
-	var btnRefresh = document.getElementById('btn-refresh');
-	var btnUpdate = document.getElementById('btn-update');
+<style>
+	.soloist-status { padding: .75rem; background: rgba(127,127,127,.08); border-radius: 6px; }
+	.soloist-status-row { display: flex; align-items: center; gap: .75rem; margin-bottom: .75rem; }
+	.soloist-label { font-weight: 600; }
+	.soloist-badge { padding: .15rem .6rem; border-radius: 999px; font-size: .85rem; font-weight: 600; color: #fff; background: #6b7280; }
+	.soloist-badge.ok { background: #0b7a3b; }
+	.soloist-badge.warn { background: #a15c00; }
+	.soloist-badge.err { background: #a11b1b; }
+	.soloist-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: .35rem .75rem; font-size: .9rem; }
+	.soloist-grid > div { display: flex; justify-content: space-between; gap: 1rem; border-bottom: 1px solid rgba(127,127,127,.15); padding: .15rem 0; }
+	.soloist-grid span { opacity: .65; }
+	.soloist-grid em { font-style: normal; font-weight: 600; text-align: right; }
+	.soloist-grid em.mono { font-family: monospace; font-weight: 400; font-size: .82rem; }
+	.soloist-actions { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .9rem; }
+	.soloist-message { margin-top: .7rem; padding: .5rem .7rem; border-radius: 5px; font-size: .9rem; }
+	.soloist-message.info { background: rgba(43,108,176,.18); }
+	.soloist-message.ok { background: rgba(11,122,59,.18); }
+	.soloist-message.err { background: rgba(161,27,27,.18); }
+	.soloist-log { margin-top: .7rem; max-height: 22rem; overflow: auto; font-size: .78rem;
+		background: rgba(0,0,0,.35); color: #e5e7eb; padding: .6rem; border-radius: 5px; white-space: pre-wrap; }
+</style>
 
-	function updateStatus() {
+<script type="text/javascript">
+(function () {
+	var url_status = '<%=url("admin/services/spotify-soloist/status")%>';
+	var url_action = '<%=url("admin/services/spotify-soloist/service")%>';
+	var url_update = '<%=url("admin/services/spotify-soloist/update")%>';
+	var url_log    = '<%=url("admin/services/spotify-soloist/log")%>';
+
+	var token = '<%=luci.dispatcher.context.authtoken or ""%>';
+	var poll = null;
+
+	function el(id) { return document.getElementById(id); }
+
+	function set(id, text, cls) {
+		var node = el(id);
+		if (!node) return;
+		node.textContent = text;
+		if (cls !== undefined) node.style.color = cls;
+	}
+
+	function say(text, kind) {
+		var box = el('soloist-message');
+		box.style.display = 'block';
+		box.className = 'soloist-message ' + (kind || 'info');
+		box.textContent = text;
+	}
+
+	function post(url, data, done) {
+		var body = [];
+		for (var k in data) {
+			body.push(encodeURIComponent(k) + '=' + encodeURIComponent(data[k]));
+		}
+		body.push('token=' + encodeURIComponent(token));
+
 		var xhr = new XMLHttpRequest();
-		xhr.open('GET', '<%=luci.dispatcher.build_url("admin/services/spotify-soloist/status")%>', true);
-		xhr.onload = function() {
-			if (xhr.status === 200) {
-				var data = JSON.parse(xhr.responseText);
+		xhr.open('POST', url, true);
+		xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+		xhr.onreadystatechange = function () {
+			if (xhr.readyState !== 4) return;
+			var parsed = null;
+			try { parsed = JSON.parse(xhr.responseText); } catch (e) {}
+			done(parsed, xhr.status);
+		};
+		xhr.send(body.join('&'));
+	}
 
-				// Service status badge
-				if (data.running) {
-					statusBadge.textContent = 'Running';
-					statusBadge.style.background = '#10B981';
-					statusBadge.style.color = '#FFFFFF';
-				} else if (data.enabled) {
-					statusBadge.textContent = 'Stopped';
-					statusBadge.style.background = '#F59E0B';
-					statusBadge.style.color = '#FFFFFF';
-				} else {
-					statusBadge.textContent = 'Disabled';
-					statusBadge.style.background = '#6B7280';
-					statusBadge.style.color = '#FFFFFF';
-				}
+	function render(d) {
+		var badge = el('soloist-badge');
 
-				// Binary status
-				binaryStatus.textContent = data.binary_exists ? 'Installed' : 'Not Found';
-				binaryStatus.style.color = data.binary_exists ? '#10B981' : '#EF4444';
+		if (d.enabled != '1') {
+			badge.className = 'soloist-badge';
+			badge.textContent = '<%:Disabled%>';
+		} else if (d.running == 'true') {
+			badge.className = 'soloist-badge ok';
+			badge.textContent = '<%:Running%>';
+		} else {
+			badge.className = 'soloist-badge warn';
+			badge.textContent = '<%:Stopped%>';
+		}
 
-				// Device name
-				deviceName.textContent = data.device_name;
+		if (d.installed == 'true') {
+			set('soloist-binary', '<%:installed%>', '#0b7a3b');
+		} else {
+			set('soloist-binary', '<%:not downloaded%>', '#a15c00');
+		}
 
-				// WebSocket status
-				if (data.ws_enabled) {
-					wsStatus.textContent = 'Enabled on port ' + data.ws_port;
-					wsStatus.style.color = '#10B981';
-				} else {
-					wsStatus.textContent = 'Disabled';
-					wsStatus.style.color = '#6B7280';
-				}
+		var days = parseInt(d.days_remaining, 10);
+		if (isNaN(days) || days < 0) {
+			set('soloist-expiry', '<%:unknown%>', '#6b7280');
+		} else if (days <= 0) {
+			set('soloist-expiry', '<%:expired%>', '#a11b1b');
+		} else if (days <= 15) {
+			set('soloist-expiry', days + ' <%:days%>', '#a11b1b');
+		} else if (days <= 30) {
+			set('soloist-expiry', days + ' <%:days%>', '#a15c00');
+		} else {
+			set('soloist-expiry', days + ' <%:days%>', '#0b7a3b');
+		}
 
-				// Days remaining
-				if (data.days_remaining > 0) {
-					daysRemaining.textContent = data.days_remaining + ' days';
-					if (data.days_remaining <= 15) {
-						daysRemaining.style.color = '#EF4444';
-					} else if (data.days_remaining <= 30) {
-						daysRemaining.style.color = '#F59E0B';
-					} else {
-						daysRemaining.style.color = '#10B981';
-					}
-				} else {
-					daysRemaining.textContent = 'Unknown';
-					daysRemaining.style.color = '#6B7280';
-				}
+		set('soloist-version', d.version || '-');
+		set('soloist-device', d.device_name || '-');
+		set('soloist-backend', d.backend || '-');
 
-				// Version
-				version.textContent = data.version;
+		if (d.api_key_present != 'true') {
+			set('soloist-login', '<%:no API key%>', '#a11b1b');
+		} else if (d.logged_in == 'yes') {
+			set('soloist-login', '<%:paired%>', '#0b7a3b');
+		} else if (d.logged_in == 'no') {
+			set('soloist-login', '<%:not paired yet%>', '#a15c00');
+		} else {
+			set('soloist-login', '<%:unknown%>', '#6b7280');
+		}
+
+		if (d.ws_enabled == '1' && d.ws_endpoint) {
+			set('soloist-ws', d.ws_endpoint);
+		} else if (d.ws_enabled == '1') {
+			set('soloist-ws', '<%:enabled%>');
+		} else {
+			set('soloist-ws', '<%:disabled%>', '#6b7280');
+		}
+
+		var arch = d.arch || '-';
+		if (d.arch_supported == 'true') {
+			set('soloist-arch', arch);
+		} else {
+			set('soloist-arch', arch + ' (<%:unsupported%>)', '#a11b1b');
+		}
+
+		if (d.log) el('soloist-log').textContent = d.log;
+		return d;
+	}
+
+	function refresh() {
+		var xhr = new XMLHttpRequest();
+		xhr.open('GET', url_status, true);
+		xhr.onreadystatechange = function () {
+			if (xhr.readyState !== 4 || xhr.status !== 200) return;
+			var d = null;
+			try { d = JSON.parse(xhr.responseText); } catch (e) { return; }
+
+			var was_updating = el('soloist-badge').dataset.updating === '1';
+			d = render(d);
+
+			if (was_updating && d.updating !== true) {
+				el('soloist-badge').dataset.updating = '0';
+				say('<%:Update finished.%>', 'ok');
 			}
 		};
 		xhr.send();
 	}
 
-	function triggerUpdate() {
-		btnUpdate.disabled = true;
-		btnUpdate.textContent = 'Updating...';
-		updateMessage.style.display = 'block';
-		updateMessage.textContent = 'Downloading latest binary, please wait...';
-		updateMessage.style.background = '#3B82F6';
-		updateMessage.style.color = '#FFFFFF';
-
-		var xhr = new XMLHttpRequest();
-		xhr.open('POST', '<%=luci.dispatcher.build_url("admin/services/spotify-soloist/update")%>', true);
-		xhr.onload = function() {
-			btnUpdate.disabled = false;
-			btnUpdate.textContent = 'Update Now';
-
-			if (xhr.status === 200) {
-				var data = JSON.parse(xhr.responseText);
-				if (data.success) {
-					updateMessage.textContent = 'Update completed successfully!';
-					updateMessage.style.background = '#10B981';
-					setTimeout(function() {
-						updateMessage.style.display = 'none';
-						updateStatus();
-					}, 3000);
-				} else {
-					updateMessage.textContent = 'Update failed: ' + (data.message || 'Unknown error');
-					updateMessage.style.background = '#EF4444';
-				}
+	function control(action) {
+		say('<%:Working...%>', 'info');
+		post(url_action, { action: action }, function (res) {
+			if (!res || !res.ok) {
+				say((res && res.error) || '<%:the request failed%>', 'err');
+			} else {
+				say(action + ': ' + (res.output || 'done'), 'ok');
 			}
-		};
-		xhr.onerror = function() {
-			btnUpdate.disabled = false;
-			btnUpdate.textContent = 'Update Now';
-			updateMessage.textContent = 'Network error';
-			updateMessage.style.background = '#EF4444';
-			updateMessage.style.color = '#FFFFFF';
-		};
-		xhr.send();
+			refresh();
+		});
 	}
 
-	btnRefresh.addEventListener('click', updateStatus);
-	btnUpdate.addEventListener('click', triggerUpdate);
+	el('soloist-btn-start').onclick   = function () { control('start'); };
+	el('soloist-btn-stop').onclick    = function () { control('stop'); };
+	el('soloist-btn-restart').onclick = function () { control('restart'); };
 
-	// Initial load
-	updateStatus();
+	el('soloist-btn-update').onclick = function () {
+		say('<%:Downloading the current Soloist build...%>', 'info');
+		el('soloist-badge').dataset.updating = '1';
+		post(url_update, { force: '1' }, function (res) {
+			if (!res || !res.ok) {
+				el('soloist-badge').dataset.updating = '0';
+				say((res && res.error) || '<%:could not start the update%>', 'err');
+				return;
+			}
+			// The download outlives this request, so poll until the lock clears.
+			if (poll) clearInterval(poll);
+			poll = setInterval(refresh, 3000);
+			refresh();
+		});
+	};
 
-	// Auto refresh every 30 seconds
-	setInterval(updateStatus, 30000);
+	el('soloist-btn-log').onclick = function () {
+		var box = el('soloist-log');
+		if (box.style.display === 'block') {
+			box.style.display = 'none';
+			return;
+		}
+		var xhr = new XMLHttpRequest();
+		xhr.open('GET', url_log, true);
+		xhr.onreadystatechange = function () {
+			if (xhr.readyState !== 4) return;
+			box.textContent = xhr.responseText || '';
+			box.style.display = 'block';
+		};
+		xhr.send();
+	};
+
+	refresh();
+	setInterval(refresh, 20000);
 })();
 </script>
 

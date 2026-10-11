@@ -1,116 +1,102 @@
-## v1.0.0 (2026-10-11)
+# Changelog
 
-### 🎉 首次发布
+## 1.0.0 — unreleased
 
-完整的 Spotify Soloist OpenWrt 集成方案。
+First version that matches the real Spotify Soloist binary.
 
-#### ✨ 新功能
+### Note on this release
 
-**核心包 (spotify-soloist)**
-- 多架构支持：ARMv7, ARMv8/AArch64, x86_64
-- 自动二进制下载和安装
-- Procd 服务集成
-- UCI 配置系统
-- 90天过期自动更新机制
-  - Cron 定期检查
-  - 阈值触发更新
-  - 手动更新接口
-- 服务日志集成到 syslog
+An earlier draft of this project was written without reading Spotify's
+documentation or inspecting the binaries. It invented command line flags
+(`--cache-size-limit`, `--bitrate`, `--enable-volume-normalisation`,
+`--log-level`), invented download URLs, and documented options that Soloist does
+not have (bitrate, volume normalisation, direct ALSA output). It also claimed a
+test suite passed when nothing had been run.
 
-**LuCI Web 界面 (luci-app-spotify-soloist)**
-- 实时状态监控
-  - 服务运行状态
-  - 剩余有效天数（带颜色警告）
-  - 设备信息和版本
-- 完整配置管理
-  - 设备名称
-  - 音频质量设置
-  - WebSocket API 配置
-  - 自动更新设置
-- 操作功能
-  - 刷新状态
-  - 一键更新
-  - 实时反馈
+That draft has been discarded. Every flag, exit code, download URL and library
+requirement in this release was verified by downloading the published archives and
+running the binary. The verification is recorded in
+[docs/soloist-reference.md](docs/soloist-reference.md), and the code was rewritten
+from that reference.
 
-#### 📦 包含文件
+### Features
 
-**spotify-soloist/**
-- Makefile
-- files/etc/config/spotify-soloist
-- files/etc/init.d/spotify-soloist
-- files/usr/bin/spotify-soloist-updater
-- files/usr/bin/spotify-soloist-check
+**Service packaging**
 
-**luci-app-spotify-soloist/**
-- Makefile
-- luasrc/controller/spotify-soloist.lua
-- luasrc/model/cbi/spotify-soloist.lua
-- luasrc/view/spotify-soloist/status.htm
-- root/usr/share/rpcd/acl.d/luci-app-spotify-soloist.json
+- procd service with UCI configuration
+- runs as an unprivileged `soloist` user, added to the `audio` and `pulse`
+  groups, with a `run_as_root` escape hatch for diagnosis
+- the API key is stored in `/etc/spotify-soloist/api-key` at mode `0600` rather
+  than in UCI, and is passed to the daemon through a file rather than a shell
+  argument
+- refuses to start an expired build, so procd does not respawn it forever
+- reports the specific reason a start failed instead of failing silently
 
-#### 📚 文档
+**90-day expiry handling**
 
-- README.md - 完整的使用指南
-- DEVELOPMENT.md - 开发者文档
-- CONTRIBUTING.md - 贡献指南
-- LICENSE - MIT 许可证
-- CHANGELOG.md - 本文件
+- build timestamp parsed from `soloist --version`, using pure shell date
+  arithmetic so it does not depend on `date -d`
+- weekly cron check with a configurable threshold (default 15 days)
+- downloads to a staging directory, verifies, then installs atomically
+- keeps the previous binary and restores it if the new build does not stay up
+- a deadman timer rolls back an update that outlives the request that started it
+- the LuCI page warns at 30 and 15 days
 
-#### 🛠️ 工具脚本
+**Verification before installing**
 
-- build.sh - 快速编译脚本
-- test.sh - 测试套件
+- rejects an implausibly small download
+- confirms the archive contains a `soloist` executable
+- checks the ELF machine type against the running architecture
+- executes the candidate with `--version` and validates the output, which is
+  what catches a wrong architecture and missing shared libraries
+- refuses an already-expired build
+- optional hash pinning via `/etc/spotify-soloist/sha256` for anyone who wants
+  reproducibility more than automatic updates
 
-#### 🔧 配置选项
+**Audio**
 
-- `enabled` - 启用/禁用服务
-- `device_name` - Spotify Connect 设备名称
-- `ws_enabled` - WebSocket API 开关
-- `ws_port` - WebSocket 端口
-- `auto_update` - 自动更新开关
-- `update_threshold` - 更新阈值（天）
-- `check_update_cron` - Cron 检查计划
-- `cache_size_limit` - 缓存大小限制
-- `bitrate` - 音频比特率
-- `normalize_volume` - 音量标准化
-- `log_level` - 日志级别
+- resolves an ALSA card (`hw:N`) to the sound server's sink name and applies it
+  as `PULSE_SINK` for the daemon only
+- sets `PULSE_SERVER`, `PULSE_COOKIE` and `XDG_RUNTIME_DIR` for a system-mode
+  PulseAudio, including the cookie permissions a group member needs
+- PipeWire support with `XDG_RUNTIME_DIR`/`PIPEWIRE_RUNTIME_DIR` and
+  `--pipewire-device`
+- refuses to start when no sound server is installed, rather than playing into
+  nothing
 
-#### 🎯 系统要求
+**LuCI**
 
-- OpenWrt 21.02 或更新版本
-- ARMv7 / ARMv8 / x86_64 架构
-- 至少 50MB 可用空间
-- PulseAudio 或 PipeWire
-- 互联网连接
+- status page: running state, installed build, days remaining with colour
+  warnings, device name, sound server, login state, endpoint, architecture
+- start/stop/restart, one-click update with progress polling, update log viewer
+- API key field, stored out of band and never displayed again
+- output device list read from `/proc/asound/cards`
+- dynamic warnings when no sound card, no sound server, or a downstream
+  scheduled task is missing
 
-#### 🙏 致谢
+**Documentation**
 
-- Spotify - 提供 Soloist 客户端
-- OpenWrt 项目
-- LuCI 项目
-- 社区贡献者
+- `docs/soloist-reference.md` — verified flags, exit codes, URLs, library
+  requirements, WebSocket API
+- `docs/limitations.md` — the glibc/musl problem and everything else that will
+  not work
+- `docs/audio-output.md` — USB DAC, 3.5 mm jack, HDMI, and why ALSA is not an
+  option
+- `docs/architecture.md` — component and data flow
 
----
+### Known limitations
 
-## 未来计划
+See [docs/limitations.md](docs/limitations.md). The significant ones:
 
-### v1.1.0 (计划中)
-
-- [ ] 更精确的剩余天数检测
-- [ ] 下载进度显示
-- [ ] 离线包安装支持
-- [ ] 多语言支持（英文、简体中文）
-- [ ] 更好的错误处理和恢复
-
-### v2.0.0 (远期)
-
-- [ ] 播放状态集成（当前播放显示）
-- [ ] 专辑封面显示
-- [ ] 基本播放控制（通过 WebSocket API）
-- [ ] 统计和历史记录
-- [ ] 多实例支持
-- [ ] 高级音频配置
-
----
-
-**注意**: 版本遵循 [语义化版本](https://semver.org/) 规范。
+- **glibc only.** No OpenWrt release target uses glibc, so the package is
+  unavailable on stock images by design.
+- **No checksums from Spotify**, so content verification is limited to executing
+  the candidate unless you pin a hash yourself.
+- **The expiry cannot be bypassed.** The router needs internet access at least
+  once every 90 days.
+- **One instance per data directory.** Multiple daemons need separate data
+  directories, device names and ports, managed by hand.
+- **PipeWire has no OpenWrt package**, so PulseAudio is the practical backend.
+- **Not tested on hardware.** All shell and Lua code has been syntax-checked and
+  the scripts run against a real binary, but the package has not been built with
+  the OpenWrt SDK nor installed on a device.

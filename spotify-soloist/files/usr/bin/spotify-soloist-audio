@@ -1,0 +1,133 @@
+#!/bin/sh
+#
+# spotify-soloist-audio -- inspect and select the sound server's output.
+#
+# Spotify Soloist never talks to ALSA itself. It hands audio to PipeWire or
+# PulseAudio, and that server decides which card, USB DAC or headphone jack it
+# comes out of. This script is the bridge between the router's ALSA devices and
+# whatever name the sound server uses for the same output.
+#
+# The selected output is applied as PULSE_SINK for the daemon only, so changing
+# it does not disturb anything else running on the router.
+
+. /usr/lib/spotify-soloist/common.sh
+
+PACTL=/usr/bin/pactl
+
+have_pactl() {
+	[ -x "$PACTL" ]
+}
+
+# Sink names are long and unfriendly; the description is what a person
+# recognises. Both are printed so either can be pasted into the configuration.
+list_sinks() {
+	if ! have_pactl; then
+		log_msg "pactl is unavailable; install pulseaudio-tools to select a sink by name" user.warn
+		return 1
+	fi
+
+	# WirePlumber/PipeWire expose the same interface through pactl.
+	$PACTL list sinks 2>/dev/null | awk '
+		/^[ \t]*Name:/        { name = $2 }
+		/^[ \t]*Description:/ { desc = substr($0, index($0, ":") + 2) }
+		/^[ \t]*State:/       { state = $2 }
+		name != "" && desc != "" {
+			printf "%s\t%s\t%s\n", name, desc, state
+			name = ""; desc = ""; state = ""
+		}
+	'
+}
+
+# Map hw:N (or a bare card id) onto a sound-server sink name.
+#
+# PulseAudio and PipeWire both name ALSA sinks after the card, for example
+#   alsa_output.pci-0000_00_1f.3.analog-stereo
+#   alsa_output.usb-Generic_USB_Audio-00.analog-stereo
+# so matching on the card's driver-independent identifier is reliable enough.
+resolve_sink() {
+	local want="$1" card_id="" card_num="" candidate
+
+	case "$want" in
+		hw:*)
+			card_num=${want#hw:}
+			card_id=$(sed -n "s/^ *${card_num} *\[\([^]]*\)\].*/\1/p" /proc/asound/cards 2>/dev/null |
+				head -n 1)
+			;;
+		*)
+			card_id="$want"
+			;;
+	esac
+
+	[ -n "$card_id" ] || return 1
+
+	# Prefer an exact-looking match, then fall back to a substring match.
+	candidate=$(list_sinks 2>/dev/null | awk -F'\t' -v id="$card_id" '
+		index($1, id) { print $1; found = 1; exit }
+		END { exit(found ? 0 : 1) }
+	') || candidate=""
+
+	[ -n "$candidate" ] || return 1
+	echo "$candidate"
+}
+
+# Everything the LuCI page needs to offer a sensible list of outputs.
+list_choices() {
+	local num id desc
+
+	# 1. What ALSA sees. This is the ground truth for hardware.
+	if [ -r /proc/asound/cards ]; then
+		awk '
+			/^ *[0-9]+ *\[/ {
+				match($0, /^ *[0-9]+/)
+				num = substr($0, RSTART, RLENGTH)
+				gsub(/ /, "", num)
+				match($0, /\[[^]]*\]/)
+				id = substr($0, RSTART + 1, RLENGTH - 2)
+				rest = substr($0, RSTART + RLENGTH)
+				sub(/^ *: */, "", rest)
+				printf "hw:%s\t%s\t%s\n", num, id, rest
+			}
+		' /proc/asound/cards 2>/dev/null
+	fi
+
+	# 2. What the sound server calls those, if it is running.
+	if have_pactl; then
+		list_sinks 2>/dev/null | while IFS="$(printf '\t')" read -r name desc state; do
+			printf "sink\t%s\t%s (%s)\n" "$name" "$desc" "$state"
+		done
+	fi
+
+	return 0
+}
+
+case "$1" in
+	--list)
+		list_choices
+		;;
+	--list-sinks)
+		list_sinks
+		;;
+	--resolve)
+		[ -n "$2" ] || {
+			echo "usage: spotify-soloist-audio --resolve <hw:N|card-id>" >&2
+			exit 1
+		}
+		resolve_sink "$2"
+		;;
+	--apply)
+		# Used at service start: turn the configured device into a sink name.
+		[ -n "$2" ] || exit 1
+		[ "$2" = "auto" ] && exit 0
+		resolve_sink "$2"
+		;;
+	*)
+		cat <<'EOF' >&2
+Usage: spotify-soloist-audio <command>
+
+  --list                     List ALSA cards and sound-server sinks.
+  --list-sinks               List sound-server sinks only.
+  --resolve <hw:N|card-id>   Print the sink name for an ALSA card.
+EOF
+		exit 1
+		;;
+esac

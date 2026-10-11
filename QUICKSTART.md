@@ -1,126 +1,127 @@
-# Spotify Soloist OpenWrt - 快速开始
+# Quick start
 
-## 5 分钟快速上手
+## Before you start
 
-### 1. 下载安装包
+Two things decide whether this can work at all. Check both first.
 
-访问 [Releases](https://github.com/yourusername/spotify-soloist-openwrt/releases) 下载对应架构的 ipk 包。
-
-### 2. 安装到路由器
+**1. Is your system glibc?** Spotify ships glibc-only builds and OpenWrt is musl.
+On a stock OpenWrt image this will not run:
 
 ```bash
-# 传输到路由器
-scp spotify-soloist_*.ipk luci-app-spotify-soloist_*.ipk root@192.168.1.1:/tmp/
-
-# SSH 登录
-ssh root@192.168.1.1
-
-# 安装
-opkg install /tmp/spotify-soloist_*.ipk
-opkg install /tmp/luci-app-spotify-soloist_*.ipk
+ls /lib/ld-linux-*.so.* 2>/dev/null    # a glibc loader means you are fine
 ```
 
-### 3. 启用服务
+If that prints nothing, stop and read [docs/limitations.md](docs/limitations.md).
+`librespot` is the working alternative on musl.
 
-**方法 A: 通过 LuCI Web 界面**
-
-1. 浏览器访问: `http://192.168.1.1`
-2. 导航到: 服务 → Spotify Soloist
-3. 勾选 **启用**
-4. 设置 **设备名称** (例如: "Living Room Speaker")
-5. 点击 **保存并应用**
-
-**方法 B: 通过命令行**
+**2. Is a sound server installed?** Soloist cannot talk to a sound card directly.
 
 ```bash
-# 启用并启动服务
+opkg install pulseaudio-daemon pulseaudio-tools alsa-utils
+```
+
+## Install
+
+```bash
+./build.sh                       # needs SDK_PATH set, see README
+./install.sh                     # or copy the .ipk files and use opkg
+```
+
+## Get an API key
+
+A **Spotify Premium** account is required. Generate the key at
+<https://developer.spotify.com/dashboard/soloist>.
+
+## Configure
+
+In LuCI: **Services → Spotify Soloist**.
+
+1. Paste the API key and save
+2. Tick **Enable Spotify Soloist**
+3. Choose the output under **Audio output** (the list is read from the hardware)
+4. Save & Apply
+
+Or from the shell:
+
+```bash
+echo 'YOUR_API_KEY' > /tmp/k
+/usr/bin/spotify-soloist-set-key /tmp/k
+
 uci set spotify-soloist.main.enabled='1'
-uci set spotify-soloist.main.device_name='My OpenWrt Speaker'
+uci set spotify-soloist.main.device_name='Kitchen speaker'
 uci commit spotify-soloist
+
 /etc/init.d/spotify-soloist enable
 /etc/init.d/spotify-soloist start
 ```
 
-### 4. 在 Spotify 中使用
+The binary downloads during the first start. Watch it happen:
 
-1. 打开 Spotify 应用（手机/电脑/平板）
-2. 播放任意歌曲
-3. 点击 **设备** 按钮（扬声器图标）
-4. 选择你的 OpenWrt 设备
-5. 🎵 开始享受音乐！
-
----
-
-## 常见问题快速解答
-
-### Q: 找不到设备？
 ```bash
-# 检查服务状态
-/etc/init.d/spotify-soloist status
-
-# 查看日志
-logread | grep soloist
+logread -f | grep -i soloist
 ```
 
-### Q: 服务启动失败？
-```bash
-# 手动下载二进制文件
-/usr/bin/spotify-soloist-updater
+## Pair and play
 
-# 重启服务
+1. Open Spotify on a device on the same network
+2. Play something
+3. Tap the device picker and choose the name you configured
+4. Audio should come out of the selected output
+
+Pairing is remembered in the data directory, so you only do this once — provided
+`data_dir` stays on persistent storage.
+
+## Checking it is healthy
+
+```bash
+/etc/init.d/spotify-soloist info         # version, expiry, WebSocket endpoint
+/usr/bin/spotify-soloist-check --days    # how long this build has left
+```
+
+## Common problems
+
+**Service will not start.** Read the log — the init script reports the specific
+reason rather than failing silently:
+
+```bash
+logread | grep -i soloist | tail -20
+```
+
+The usual causes, in order of likelihood:
+
+- no API key stored yet
+- the binary has expired, or is not downloaded
+- no sound server installed
+
+**Device is not in the Spotify picker.** Same network, and the router must not
+have client isolation or a firewall rule blocking mDNS between subnets.
+
+**No sound.** Almost always the sound server rather than Soloist:
+
+```bash
+cat /proc/asound/cards      # is a card even attached?
+ps | grep -E 'pulseaudio|pipewire'
+pactl list short sinks      # does the server see an output?
+```
+
+If a card is attached but the server does not list it, the kernel module for that
+card is probably missing. For USB audio that is `kmod-usb-audio`.
+
+**Wrong output (USB DAC vs on-board jack).** Pick the card in the LuCI page and
+restart. It is applied per-service, so nothing else on the router is affected.
+
+## What happens after 90 days
+
+Every Soloist build stops working 90 days after its build date. The weekly check
+installed with the package downloads a fresh build once 15 days remain. You do
+not have to do anything, as long as the router has internet access.
+
+If it does lapse:
+
+```bash
+/usr/bin/spotify-soloist-updater --force
 /etc/init.d/spotify-soloist restart
 ```
 
-### Q: 如何查看剩余天数？
-```bash
-# 命令行查看
-/usr/bin/spotify-soloist-check --days
-
-# 或访问 LuCI 界面查看
-```
-
----
-
-## 进阶配置
-
-### 音频质量设置
-
-```bash
-# 320kbps 高品质
-uci set spotify-soloist.main.bitrate='320'
-uci commit spotify-soloist
-/etc/init.d/spotify-soloist restart
-```
-
-### 启用 WebSocket API
-
-```bash
-uci set spotify-soloist.main.ws_enabled='1'
-uci set spotify-soloist.main.ws_port='8080'
-uci commit spotify-soloist
-/etc/init.d/spotify-soloist restart
-```
-
-### 自定义自动更新
-
-```bash
-# 每天凌晨 2 点检查
-uci set spotify-soloist.main.check_update_cron='0 2 * * *'
-uci commit spotify-soloist
-
-# 更新 cron 任务
-crontab -l | grep -v spotify-soloist-check | crontab -
-(crontab -l; echo "0 2 * * * /usr/bin/spotify-soloist-check") | crontab -
-```
-
----
-
-## 获取帮助
-
-- 📖 [完整文档](README.md)
-- 🐛 [报告问题](https://github.com/yourusername/spotify-soloist-openwrt/issues)
-- 💬 [社区讨论](https://github.com/yourusername/spotify-soloist-openwrt/discussions)
-
----
-
-**享受你的 Spotify 音乐！** 🎶
+Full details, including why the expiry cannot be bypassed, are in
+[docs/limitations.md](docs/limitations.md).
