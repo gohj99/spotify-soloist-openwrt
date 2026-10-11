@@ -1,0 +1,93 @@
+#!/bin/sh /etc/rc.common
+
+START=95
+STOP=10
+USE_PROCD=1
+
+PROG=/usr/sbin/soloist
+CONF=spotify-soloist
+
+start_service() {
+	local enabled device_name ws_enabled ws_port cache_size bitrate normalize log_level
+
+	config_load "${CONF}"
+	config_get_bool enabled main enabled 0
+
+	[ "$enabled" -eq 0 ] && {
+		echo "Spotify Soloist is disabled in config"
+		return 1
+	}
+
+	[ -x "$PROG" ] || {
+		echo "ERROR: Soloist binary not found at $PROG"
+		echo "Run: /usr/bin/spotify-soloist-updater"
+		return 1
+	}
+
+	config_get device_name main device_name "OpenWrt Spotify"
+	config_get_bool ws_enabled main ws_enabled 1
+	config_get ws_port main ws_port 8080
+	config_get cache_size main cache_size_limit 512
+	config_get bitrate main bitrate "default"
+	config_get_bool normalize main normalize_volume 0
+	config_get log_level main log_level "info"
+
+	procd_open_instance
+	procd_set_param command "$PROG"
+
+	# Device name
+	procd_append_param command --device-name "$device_name"
+
+	# WebSocket API
+	[ "$ws_enabled" -eq 1 ] && {
+		procd_append_param command --ws "127.0.0.1:${ws_port}"
+	}
+
+	# Cache size (MB)
+	procd_append_param command --cache-size-limit "${cache_size}"
+
+	# Bitrate
+	[ "$bitrate" != "default" ] && {
+		procd_append_param command --bitrate "$bitrate"
+	}
+
+	# Volume normalization
+	[ "$normalize" -eq 1 ] && {
+		procd_append_param command --enable-volume-normalisation
+	}
+
+	# Log level
+	case "$log_level" in
+		trace|debug|info|warn|error)
+			procd_append_param command --log-level "$log_level"
+			;;
+	esac
+
+	# Respawn on crash: threshold(sec) timeout(sec) retry(count)
+	procd_set_param respawn 3600 5 0
+
+	# Log stdout/stderr to syslog
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+
+	# Working directory
+	procd_set_param dir /tmp
+
+	# Reload triggers
+	procd_set_param file /etc/config/${CONF}
+
+	procd_close_instance
+}
+
+stop_service() {
+	killall -q soloist
+}
+
+service_triggers() {
+	procd_add_reload_trigger "${CONF}"
+}
+
+reload_service() {
+	stop
+	start
+}

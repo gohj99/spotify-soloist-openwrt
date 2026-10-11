@@ -1,0 +1,176 @@
+#!/bin/sh
+# Spotify Soloist Binary Updater
+# Handles 90-day expiration by downloading latest binary
+
+set -e
+
+INSTALL_PATH="/usr/sbin/soloist"
+BACKUP_PATH="/usr/sbin/soloist.backup"
+TEMP_DIR="/tmp/soloist-update"
+BASE_URL="https://developer.spotify.com/soloist/download"
+LOG_TAG="spotify-soloist-updater"
+
+# Architecture detection
+detect_arch() {
+	local machine=$(uname -m)
+	case "$machine" in
+		aarch64|arm64)
+			echo "aarch64"
+			;;
+		armv7l|armv7)
+			echo "armv7"
+			;;
+		x86_64|amd64)
+			echo "x86_64"
+			;;
+		*)
+			logger -t "$LOG_TAG" -p user.err "Unsupported architecture: $machine"
+			echo "unknown"
+			return 1
+			;;
+	esac
+}
+
+# Get download URL for architecture
+get_download_url() {
+	local arch="$1"
+	case "$arch" in
+		aarch64)
+			echo "${BASE_URL}/latest/linux-aarch64/soloist.tar.gz"
+			;;
+		armv7)
+			echo "${BASE_URL}/latest/linux-armv7/soloist.tar.gz"
+			;;
+		x86_64)
+			echo "${BASE_URL}/latest/linux-x86_64/soloist.tar.gz"
+			;;
+		*)
+			return 1
+			;;
+	esac
+}
+
+# Download and extract binary
+download_binary() {
+	local url="$1"
+	local temp_archive="${TEMP_DIR}/soloist.tar.gz"
+
+	logger -t "$LOG_TAG" "Downloading from: $url"
+
+	# Create temp directory
+	rm -rf "$TEMP_DIR"
+	mkdir -p "$TEMP_DIR"
+
+	# Download with curl
+	if ! curl -L -f -o "$temp_archive" "$url" --connect-timeout 30 --max-time 300; then
+		logger -t "$LOG_TAG" -p user.err "Download failed"
+		rm -rf "$TEMP_DIR"
+		return 1
+	fi
+
+	# Extract tarball
+	if ! tar -xzf "$temp_archive" -C "$TEMP_DIR"; then
+		logger -t "$LOG_TAG" -p user.err "Extraction failed"
+		rm -rf "$TEMP_DIR"
+		return 1
+	fi
+
+	# Find soloist binary in extracted files
+	local binary_path
+	binary_path=$(find "$TEMP_DIR" -type f -name "soloist" -executable | head -n 1)
+
+	if [ -z "$binary_path" ]; then
+		logger -t "$LOG_TAG" -p user.err "Binary not found in archive"
+		rm -rf "$TEMP_DIR"
+		return 1
+	fi
+
+	echo "$binary_path"
+}
+
+# Install binary
+install_binary() {
+	local source="$1"
+	local service_was_running=0
+
+	# Check if service is running
+	if /etc/init.d/spotify-soloist running >/dev/null 2>&1; then
+		service_was_running=1
+		logger -t "$LOG_TAG" "Stopping service for update"
+		/etc/init.d/spotify-soloist stop
+		sleep 2
+	fi
+
+	# Backup existing binary
+	if [ -f "$INSTALL_PATH" ]; then
+		cp "$INSTALL_PATH" "$BACKUP_PATH"
+		logger -t "$LOG_TAG" "Backed up existing binary"
+	fi
+
+	# Install new binary
+	cp "$source" "$INSTALL_PATH"
+	chmod +x "$INSTALL_PATH"
+
+	# Verify installation
+	if ! "$INSTALL_PATH" --version >/dev/null 2>&1; then
+		logger -t "$LOG_TAG" -p user.err "New binary validation failed, restoring backup"
+		if [ -f "$BACKUP_PATH" ]; then
+			mv "$BACKUP_PATH" "$INSTALL_PATH"
+		fi
+		return 1
+	fi
+
+	logger -t "$LOG_TAG" "Binary installed successfully"
+
+	# Restart service if it was running
+	if [ $service_was_running -eq 1 ]; then
+		logger -t "$LOG_TAG" "Restarting service"
+		/etc/init.d/spotify-soloist start
+	fi
+
+	# Cleanup
+	rm -f "$BACKUP_PATH"
+	rm -rf "$TEMP_DIR"
+
+	return 0
+}
+
+# Main update logic
+main() {
+	logger -t "$LOG_TAG" "Starting update check"
+
+	# Detect architecture
+	local arch
+	arch=$(detect_arch) || {
+		echo "ERROR: Unsupported architecture"
+		exit 1
+	}
+
+	logger -t "$LOG_TAG" "Detected architecture: $arch"
+
+	# Get download URL
+	local url
+	url=$(get_download_url "$arch") || {
+		echo "ERROR: Could not determine download URL"
+		exit 1
+	}
+
+	# Download binary
+	local binary_path
+	binary_path=$(download_binary "$url") || {
+		echo "ERROR: Download failed"
+		exit 1
+	}
+
+	# Install binary
+	if install_binary "$binary_path"; then
+		echo "SUCCESS: Spotify Soloist updated successfully"
+		logger -t "$LOG_TAG" "Update completed successfully"
+		exit 0
+	else
+		echo "ERROR: Installation failed"
+		exit 1
+	fi
+}
+
+main "$@"

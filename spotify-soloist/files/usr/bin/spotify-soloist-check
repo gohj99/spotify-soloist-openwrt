@@ -1,0 +1,102 @@
+#!/bin/sh
+# Spotify Soloist Expiration Checker
+# Checks remaining days and triggers update if needed
+
+LOG_TAG="spotify-soloist-check"
+SOLOIST_BIN="/usr/sbin/soloist"
+UPDATE_SCRIPT="/usr/bin/spotify-soloist-updater"
+
+# Get remaining days from soloist binary
+get_remaining_days() {
+	if [ ! -x "$SOLOIST_BIN" ]; then
+		echo "-1"
+		return 1
+	fi
+
+	# Try to get version info and extract build date
+	local version_output
+	version_output=$("$SOLOIST_BIN" --version 2>&1 || true)
+
+	# Try to extract remaining days from logs
+	local log_output
+	log_output=$(logread | grep -i "soloist" | grep -iE "(expire|remaining|days left)" | tail -n 5)
+
+	# Parse days from various possible formats
+	local days=-1
+
+	# Try pattern: "X days remaining"
+	days=$(echo "$log_output" | grep -oE "[0-9]+ days? remaining" | grep -oE "[0-9]+" | head -n 1)
+	if [ -z "$days" ]; then
+		# Try pattern: "expires in X days"
+		days=$(echo "$log_output" | grep -oE "expires? in [0-9]+ days?" | grep -oE "[0-9]+" | head -n 1)
+	fi
+
+	if [ -z "$days" ] || [ "$days" -eq 0 ]; then
+		# If no log info, calculate from binary build date if available
+		# This is a fallback - actual implementation may need adjustment
+		days=-1
+	fi
+
+	echo "${days:-90}"
+}
+
+# Check if update is needed
+check_and_update() {
+	local threshold
+	local auto_update
+
+	# Load config
+	. /lib/functions.sh
+	config_load spotify-soloist
+	config_get threshold main update_threshold 15
+	config_get_bool auto_update main auto_update 1
+
+	logger -t "$LOG_TAG" "Checking expiration status"
+
+	# Get remaining days
+	local remaining
+	remaining=$(get_remaining_days)
+
+	if [ "$remaining" -eq -1 ]; then
+		logger -t "$LOG_TAG" -p user.warn "Could not determine remaining days"
+		# If binary doesn't exist, try to download
+		if [ ! -x "$SOLOIST_BIN" ]; then
+			logger -t "$LOG_TAG" "Binary not found, downloading"
+			"$UPDATE_SCRIPT"
+			return $?
+		fi
+		return 0
+	fi
+
+	logger -t "$LOG_TAG" "Remaining days: $remaining"
+
+	# Check if update is needed
+	if [ "$remaining" -le "$threshold" ]; then
+		if [ "$auto_update" -eq 1 ]; then
+			logger -t "$LOG_TAG" "Remaining days ($remaining) below threshold ($threshold), triggering update"
+			"$UPDATE_SCRIPT"
+			return $?
+		else
+			logger -t "$LOG_TAG" -p user.warn "Update needed but auto_update is disabled"
+			echo "WARNING: Spotify Soloist will expire in $remaining days. Run: $UPDATE_SCRIPT"
+			return 1
+		fi
+	else
+		logger -t "$LOG_TAG" "No update needed (remaining: $remaining days)"
+		return 0
+	fi
+}
+
+# Main
+case "$1" in
+	--days)
+		get_remaining_days
+		;;
+	--force)
+		logger -t "$LOG_TAG" "Forcing update"
+		"$UPDATE_SCRIPT"
+		;;
+	*)
+		check_and_update
+		;;
+esac

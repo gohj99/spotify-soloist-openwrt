@@ -1,0 +1,170 @@
+<%+cbi/valueheader%>
+
+<div class="cbi-value-field" style="padding: 10px; background: var(--surface-1, #0F131C); border-radius: 8px;">
+	<div id="soloist-status" style="display: grid; gap: 12px;">
+		<div style="display: flex; align-items: center; gap: 8px;">
+			<span style="font-weight: 600;">Status:</span>
+			<span id="status-badge" style="padding: 4px 12px; border-radius: 999px; font-size: 0.875rem; font-weight: 500;">
+				Loading...
+			</span>
+		</div>
+
+		<div id="details-grid" style="display: grid; gap: 8px; font-size: 0.9rem;">
+			<div style="display: flex; justify-content: space-between;">
+				<span style="color: var(--text-secondary, #94A3B8);">Binary Status:</span>
+				<span id="binary-status">-</span>
+			</div>
+			<div style="display: flex; justify-content: space-between;">
+				<span style="color: var(--text-secondary, #94A3B8);">Device Name:</span>
+				<span id="device-name">-</span>
+			</div>
+			<div style="display: flex; justify-content: space-between;">
+				<span style="color: var(--text-secondary, #94A3B8);">WebSocket API:</span>
+				<span id="ws-status">-</span>
+			</div>
+			<div style="display: flex; justify-content: space-between;">
+				<span style="color: var(--text-secondary, #94A3B8);">Days Until Expiration:</span>
+				<span id="days-remaining" style="font-weight: 600;">-</span>
+			</div>
+			<div style="display: flex; justify-content: space-between;">
+				<span style="color: var(--text-secondary, #94A3B8);">Version:</span>
+				<span id="version" style="font-family: monospace; font-size: 0.85rem;">-</span>
+			</div>
+		</div>
+
+		<div style="display: flex; gap: 8px; margin-top: 8px;">
+			<button id="btn-refresh" class="cbi-button" style="padding: 6px 16px; border-radius: 6px;">
+				Refresh Status
+			</button>
+			<button id="btn-update" class="cbi-button cbi-button-apply" style="padding: 6px 16px; border-radius: 6px;">
+				Update Now
+			</button>
+		</div>
+
+		<div id="update-message" style="display: none; margin-top: 8px; padding: 8px 12px; border-radius: 6px; font-size: 0.9rem;"></div>
+	</div>
+</div>
+
+<script>
+(function() {
+	var statusBadge = document.getElementById('status-badge');
+	var binaryStatus = document.getElementById('binary-status');
+	var deviceName = document.getElementById('device-name');
+	var wsStatus = document.getElementById('ws-status');
+	var daysRemaining = document.getElementById('days-remaining');
+	var version = document.getElementById('version');
+	var updateMessage = document.getElementById('update-message');
+	var btnRefresh = document.getElementById('btn-refresh');
+	var btnUpdate = document.getElementById('btn-update');
+
+	function updateStatus() {
+		var xhr = new XMLHttpRequest();
+		xhr.open('GET', '<%=luci.dispatcher.build_url("admin/services/spotify-soloist/status")%>', true);
+		xhr.onload = function() {
+			if (xhr.status === 200) {
+				var data = JSON.parse(xhr.responseText);
+
+				// Service status badge
+				if (data.running) {
+					statusBadge.textContent = 'Running';
+					statusBadge.style.background = '#10B981';
+					statusBadge.style.color = '#FFFFFF';
+				} else if (data.enabled) {
+					statusBadge.textContent = 'Stopped';
+					statusBadge.style.background = '#F59E0B';
+					statusBadge.style.color = '#FFFFFF';
+				} else {
+					statusBadge.textContent = 'Disabled';
+					statusBadge.style.background = '#6B7280';
+					statusBadge.style.color = '#FFFFFF';
+				}
+
+				// Binary status
+				binaryStatus.textContent = data.binary_exists ? 'Installed' : 'Not Found';
+				binaryStatus.style.color = data.binary_exists ? '#10B981' : '#EF4444';
+
+				// Device name
+				deviceName.textContent = data.device_name;
+
+				// WebSocket status
+				if (data.ws_enabled) {
+					wsStatus.textContent = 'Enabled on port ' + data.ws_port;
+					wsStatus.style.color = '#10B981';
+				} else {
+					wsStatus.textContent = 'Disabled';
+					wsStatus.style.color = '#6B7280';
+				}
+
+				// Days remaining
+				if (data.days_remaining > 0) {
+					daysRemaining.textContent = data.days_remaining + ' days';
+					if (data.days_remaining <= 15) {
+						daysRemaining.style.color = '#EF4444';
+					} else if (data.days_remaining <= 30) {
+						daysRemaining.style.color = '#F59E0B';
+					} else {
+						daysRemaining.style.color = '#10B981';
+					}
+				} else {
+					daysRemaining.textContent = 'Unknown';
+					daysRemaining.style.color = '#6B7280';
+				}
+
+				// Version
+				version.textContent = data.version;
+			}
+		};
+		xhr.send();
+	}
+
+	function triggerUpdate() {
+		btnUpdate.disabled = true;
+		btnUpdate.textContent = 'Updating...';
+		updateMessage.style.display = 'block';
+		updateMessage.textContent = 'Downloading latest binary, please wait...';
+		updateMessage.style.background = '#3B82F6';
+		updateMessage.style.color = '#FFFFFF';
+
+		var xhr = new XMLHttpRequest();
+		xhr.open('POST', '<%=luci.dispatcher.build_url("admin/services/spotify-soloist/update")%>', true);
+		xhr.onload = function() {
+			btnUpdate.disabled = false;
+			btnUpdate.textContent = 'Update Now';
+
+			if (xhr.status === 200) {
+				var data = JSON.parse(xhr.responseText);
+				if (data.success) {
+					updateMessage.textContent = 'Update completed successfully!';
+					updateMessage.style.background = '#10B981';
+					setTimeout(function() {
+						updateMessage.style.display = 'none';
+						updateStatus();
+					}, 3000);
+				} else {
+					updateMessage.textContent = 'Update failed: ' + (data.message || 'Unknown error');
+					updateMessage.style.background = '#EF4444';
+				}
+			}
+		};
+		xhr.onerror = function() {
+			btnUpdate.disabled = false;
+			btnUpdate.textContent = 'Update Now';
+			updateMessage.textContent = 'Network error';
+			updateMessage.style.background = '#EF4444';
+			updateMessage.style.color = '#FFFFFF';
+		};
+		xhr.send();
+	}
+
+	btnRefresh.addEventListener('click', updateStatus);
+	btnUpdate.addEventListener('click', triggerUpdate);
+
+	// Initial load
+	updateStatus();
+
+	// Auto refresh every 30 seconds
+	setInterval(updateStatus, 30000);
+})();
+</script>
+
+<%+cbi/valuefooter%>

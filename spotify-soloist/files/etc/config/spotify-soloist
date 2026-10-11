@@ -1,0 +1,13 @@
+
+config spotify-soloist 'main'
+	option enabled '0'
+	option device_name 'OpenWrt Spotify'
+	option ws_enabled '1'
+	option ws_port '8080'
+	option auto_update '1'
+	option check_update_cron '0 3 * * 0'
+	option update_threshold '15'
+	option cache_size_limit '512'
+	option bitrate 'default'
+	option normalize_volume '0'
+	option log_level 'info'

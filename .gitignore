@@ -1,0 +1,28 @@
+# Build artifacts
+*.o
+*.so
+*.a
+*.ipk
+
+# Temporary files
+*~
+*.swp
+*.swo
+.DS_Store
+
+# Build directories
+build/
+tmp/
+dl/
+
+# Downloaded binaries
+*/files/usr/sbin/soloist
+*.tar.gz
+*.tgz
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
