@@ -69,8 +69,12 @@ jobs:
       - name: Copy artifacts
         if: always()
         run: |
+          docker exec sdk bash -c 'ls -la /home/build/openwrt/ | head -20'
+          docker exec sdk bash -c 'ls -la /builder/ | head -20'
+          docker exec sdk bash -c 'find /home/build/openwrt/bin /builder/bin -name "*.ipk" 2>/dev/null || echo "No IPK found"'
           docker cp sdk:/home/build/openwrt/bin ./bin 2>/dev/null || mkdir -p bin
           docker cp sdk:/home/build/openwrt/logs ./logs 2>/dev/null || mkdir -p logs
+          find ./bin -name "*.ipk" || echo "No IPK in copied bin/"
 
       - name: Upload packages
         uses: actions/upload-artifact@v4
