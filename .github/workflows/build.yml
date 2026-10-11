@@ -57,13 +57,20 @@ jobs:
         run: |
           docker exec sdk bash -c '
             set -eux
-            make package/${{ matrix.package }}/compile V=s -j$(nproc)
+            echo "=== Attempting to build ${{ matrix.package }} ==="
+            make package/${{ matrix.package }}/compile V=s -j$(nproc) || {
+              echo "=== Build failed, checking package metadata ==="
+              ./scripts/feeds list -p feed
+              ls -la feeds/feed/${{ matrix.package }}/
+              exit 1
+            }
           '
 
       - name: Copy artifacts
+        if: always()
         run: |
-          docker cp sdk:/home/build/openwrt/bin ./bin
-          docker cp sdk:/home/build/openwrt/logs ./logs 2>/dev/null || true
+          docker cp sdk:/home/build/openwrt/bin ./bin 2>/dev/null || mkdir -p bin
+          docker cp sdk:/home/build/openwrt/logs ./logs 2>/dev/null || mkdir -p logs
 
       - name: Upload packages
         uses: actions/upload-artifact@v4
