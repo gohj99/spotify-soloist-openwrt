@@ -38,15 +38,10 @@ define Package/spotify-soloist
 	+ca-bundle +curl +libgcc1 +libatomic1 +libpthread +librt \
 	+pulseaudio-daemon +pulseaudio-tools +libpulse +alsa-utils \
 	+kmod-sound-core +kmod-usb-audio +kmod-sound-soc-core
-  # soloist  : the account the daemon runs as
-  # audio=29 : PulseAudio's client authorization group. OpenWrt builds it with
-  #            -Daccess_group=audio and system-mode auth_group falls back to
-  #            that name. base-files ships no audio group, so this entry creates
-  #            it, using the conventional Debian gid.
-  # pulse    : /var/run/pulse is mode 0750 pulse:pulse, so without this the
-  #            client cannot even traverse into the directory to reach the
-  #            socket. Created by pulseaudio-daemon; nothing needs the gid.
-  USERID:=soloist=soloist:audio=29,pulse
+  # soloist=: user for the daemon (uid auto-assigned by OpenWrt)
+  # audio=29: PulseAudio client auth group (-Daccess_group=audio); gid 29 is Debian convention
+  # pulse=:   membership in pulse group to access /var/run/pulse (0750 pulse:pulse)
+  USERID:=soloist=:audio=29,pulse=
 endef
 
 # Why these dependencies:
