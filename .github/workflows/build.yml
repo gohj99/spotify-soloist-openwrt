@@ -1,0 +1,88 @@
+name: Build Packages
+
+on:
+  push:
+    branches: [ main, dev ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build ${{ matrix.package }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - spotify-soloist
+          - luci-app-spotify-soloist
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Docker container
+        run: |
+          docker pull ghcr.io/openwrt/sdk:x86_64-24.10.0
+          docker create --name sdk -v "$PWD:/feed" ghcr.io/openwrt/sdk:x86_64-24.10.0 tail -f /dev/null
+          docker start sdk
+
+      - name: Configure SDK with CONFIG_BROKEN
+        run: |
+          docker exec sdk bash -c '
+            set -eux
+            # Add this feed
+            echo "src-link feed /feed/" >> feeds.conf
+            ./scripts/feeds update -a
+            ./scripts/feeds install -a -p feed
+
+            # Enable BROKEN to allow musl-incompatible packages in CI
+            echo "CONFIG_DEVEL=y" >> .config
+            echo "CONFIG_BROKEN=y" >> .config
+            make defconfig
+
+            # Verify the package is now visible
+            make -f .config -f tmp/.packagedeps \
+              -f <(echo "$(info $(sort $(package-y) $(package-m)))"; echo -en "a:\n\t@:") \
+              | grep -q "${{ matrix.package }}" || {
+                echo "ERROR: ${{ matrix.package }} not in enabled packages"
+                exit 1
+              }
+          '
+
+      - name: Build package
+        run: |
+          docker exec sdk bash -c '
+            set -eux
+            make package/${{ matrix.package }}/compile V=s -j$(nproc)
+          '
+
+      - name: Copy artifacts
+        run: |
+          docker cp sdk:/home/build/openwrt/bin ./bin
+          docker cp sdk:/home/build/openwrt/logs ./logs 2>/dev/null || true
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: ${{ matrix.package }}-ipk
+          path: bin/packages/x86_64/packages/*.ipk
+          if-no-files-found: error
+
+      - name: Upload logs
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: ${{ matrix.package }}-logs
+          path: logs/
+          if-no-files-found: ignore
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker stop sdk || true
+          docker rm sdk || true
